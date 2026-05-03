@@ -39,7 +39,6 @@ function registerIpcHandlers() {
     return constants.getIsFirstLaunch();
   });
 
-
   // Get command line preset file
   ipcMain.handle('get-command-line-preset-file', () => {
     return constants.getCommandLinePresetFile();

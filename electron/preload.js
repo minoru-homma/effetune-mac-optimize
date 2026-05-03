@@ -171,8 +171,7 @@ contextBridge.exposeInMainWorld(
     // Force check for updates (used in About dialog)
     forceCheckForUpdates: () => {
       return ipcRenderer.invoke('force-check-for-updates');
-    },
-
+    }
   }
 );
 

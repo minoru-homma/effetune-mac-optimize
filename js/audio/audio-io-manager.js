@@ -246,17 +246,14 @@ export class AudioIOManager {
                 // the WebAudio path is more reliable for HDMI reconnect recovery.
                 if (preferences?.outputDeviceId &&
                     typeof this.contextManager.audioContext?.setSinkId === 'function') {
-
                     this.audioContextSinkMode = true;
                     this.destinationNode = null; // use audioContext.destination via connectAudioNodes fallback
                     this.currentOutputDeviceId = preferences.outputDeviceId;
-
                     try {
                         await this._setSinkIdWithTimeout(this.contextManager.audioContext, preferences.outputDeviceId);
                     } catch (e) {
                         console.warn('[audioCtxSink] setSinkId failed:', e.message);
                     }
-
                     if (window.electronIntegration?.isElectronEnvironment?.()) {
                         this.startDevicePoll(
                             () => window.electronIntegration.loadAudioPreferences(),
