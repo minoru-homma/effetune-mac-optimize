@@ -388,10 +388,16 @@ function registerIpcHandlers() {
   });
 
   // Handle full app relaunch (used for HDMI reconnect recovery on macOS,
-  // where renderer-process restart is required to recover audio output)
+  // where renderer-process restart is required to recover audio output).
+  // Re-throw on failure so the renderer can fall back to window.location.reload().
   ipcMain.handle('relaunch-app', () => {
-    app.relaunch();
-    app.exit(0);
+    try {
+      app.relaunch();
+      app.exit(0);
+    } catch (error) {
+      console.error('[relaunch-app] Failed to relaunch app:', error);
+      throw error;
+    }
   });
 
   // Handle clear microphone permission request

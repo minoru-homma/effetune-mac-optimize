@@ -941,9 +941,14 @@ class App {
                 console.error('[handleOutputDeviceChange] Failed to save pipeline state before relaunch — user work may be lost:', err);
             }
 
-            if (window.electronAPI?.relaunchApp) {
-                await window.electronAPI.relaunchApp();
-            } else {
+            try {
+                if (window.electronAPI?.relaunchApp) {
+                    await window.electronAPI.relaunchApp();
+                } else {
+                    window.location.reload();
+                }
+            } catch (err) {
+                console.error('[handleOutputDeviceChange] relaunchApp failed, falling back to reload:', err);
                 window.location.reload();
             }
             return;
