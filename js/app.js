@@ -902,8 +902,12 @@ class App {
                     (d.deviceId === prefs.outputDeviceId ||
                      (prefs.outputDeviceLabel && d.label === prefs.outputDeviceLabel)));
                 if (!stillAbsent) return;
-                // Confirmed long disconnect: reset to fallback
+                // Confirmed long disconnect: reset to fallback.
+                // Save pipeline state first so a watchdog-triggered force-relaunch
+                // (if reset() somehow hangs despite our timeouts) still preserves
+                // the user's plugin configuration.
                 this._lastHdmiReconnectResetTime = 0;
+                await this._savePipelineStateBeforeRisk();
                 try {
                     await this.audioManager.reset(null);
                 } catch (err) {
@@ -964,6 +968,30 @@ class App {
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * Save current pipeline state to file (best-effort, non-blocking on failure).
+     * Used before risky audio operations so a watchdog-triggered force-relaunch
+     * still preserves the user's pipeline configuration.
+     */
+    async _savePipelineStateBeforeRisk() {
+        try {
+            const core = window.pipelineManager?.core;
+            if (window.electronAPI?.savePipelineStateToFile && core && this.audioManager) {
+                const serialize = (pl) => pl
+                    ? pl.map(p => core.getSerializablePluginState(p, false, false, false))
+                    : null;
+                const state = {
+                    pipelineA: serialize(this.audioManager.pipelineA),
+                    pipelineB: serialize(this.audioManager.pipelineB),
+                    currentPipeline: this.audioManager.currentPipeline
+                };
+                await window.electronAPI.savePipelineStateToFile(state);
+            }
+        } catch (err) {
+            console.warn('[savePipelineStateBeforeRisk] state save failed (continuing):', err);
         }
     }
 
@@ -1177,6 +1205,18 @@ async function displayAppVersion() {
         }
     }
     
+}
+
+// Renderer-side watchdog ping.  Sent every 2 s; main process force-relaunches
+// the app if it does not see a ping for 15 s.  This is the last-resort safety
+// net catching renderer freezes that escape our in-renderer timeout wrappers
+// (e.g., a native audio call that synchronously blocks the JS thread).
+if (window.electronAPI?.rendererPing) {
+    setInterval(() => {
+        try { window.electronAPI.rendererPing(); } catch (_) { /* fire-and-forget */ }
+    }, 2000);
+    // Send one immediately so the watchdog arms on first event-loop tick.
+    try { window.electronAPI.rendererPing(); } catch (_) { /* ignore */ }
 }
 
 // Set up event listeners for tray menu functionality

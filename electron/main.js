@@ -1,4 +1,4 @@
-const { app, BrowserWindow, screen, Tray, Menu } = require('electron');
+const { app, BrowserWindow, screen, Tray, Menu, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
@@ -17,6 +17,58 @@ constants.setAppVersion(appVersion);
 
 let tray = null;
 let isAppQuitting = false;
+
+// Renderer watchdog state — the renderer is expected to call 'renderer-ping'
+// every 2 s.  If the main process does not see a ping for WATCHDOG_THRESHOLD_MS,
+// the renderer is assumed to be frozen (e.g., stuck in a native audio system
+// call on macOS HDMI flux) and the whole app is forcibly relaunched.  This is
+// the last-resort safety net behind the in-renderer timeouts.
+const WATCHDOG_PING_INTERVAL_MS = 2000;
+const WATCHDOG_THRESHOLD_MS = 15000;
+let lastRendererPing = 0;
+let watchdogIntervalId = null;
+let watchdogArmed = false;
+
+function rendererPingReceived() {
+  lastRendererPing = Date.now();
+  if (!watchdogArmed) {
+    watchdogArmed = true;
+    console.log('[watchdog] First renderer ping received — watchdog armed');
+  }
+}
+
+function startWatchdog() {
+  if (watchdogIntervalId) return;
+  watchdogIntervalId = setInterval(() => {
+    if (!watchdogArmed || isAppQuitting) return;
+    const elapsed = Date.now() - lastRendererPing;
+    if (elapsed > WATCHDOG_THRESHOLD_MS) {
+      console.error(`[watchdog] Renderer unresponsive for ${elapsed}ms — forcing relaunch`);
+      clearInterval(watchdogIntervalId);
+      watchdogIntervalId = null;
+      try {
+        app.relaunch();
+        app.exit(0);
+      } catch (e) {
+        console.error('[watchdog] relaunch failed:', e);
+      }
+    }
+  }, WATCHDOG_PING_INTERVAL_MS);
+}
+
+function stopWatchdog() {
+  if (watchdogIntervalId) {
+    clearInterval(watchdogIntervalId);
+    watchdogIntervalId = null;
+  }
+  watchdogArmed = false;
+}
+
+// Renderer-ping IPC: registered here (not in ipc-handlers.js) so it can update
+// the watchdog state directly without a circular dependency.
+ipcMain.on('renderer-ping', () => {
+  rendererPingReceived();
+});
 
 // macOS only: tell Chromium to auto-approve getUserMedia() without showing its
 // own permission UI.  The actual hardware access still goes through macOS TCC,
@@ -1154,7 +1206,10 @@ app.setAsDefaultProtocolClient('effetune');
 app.whenReady().then(() => {
   // Initialize the app
   initializeApp();
-  
+
+  // Start the renderer watchdog — it self-arms once the first ping arrives.
+  startWatchdog();
+
   // On macOS, recreate window when dock icon is clicked and no windows are open
   app.on('activate', () => {
     if (isAppQuitting) return;
@@ -1166,6 +1221,7 @@ app.whenReady().then(() => {
 
 app.on('before-quit', () => {
   isAppQuitting = true;
+  stopWatchdog();
 });
 
 // Quit the app when all windows are closed (except on macOS unless explicitly quitting)

@@ -85,6 +85,10 @@ contextBridge.exposeInMainWorld(
 
     // Full app relaunch (kills renderer process — used for HDMI reconnect recovery)
     relaunchApp: () => ipcRenderer.invoke('relaunch-app'),
+
+    // Renderer ping for the main-process watchdog (fire-and-forget).  Sent every
+    // 2 s; if main does not see a ping for 15 s it forcibly relaunches the app.
+    rendererPing: () => ipcRenderer.send('renderer-ping'),
     
     // Request macOS microphone TCC permission (must be called before getUserMedia)
     requestMicrophoneAccess: () => ipcRenderer.invoke('request-microphone-access'),
