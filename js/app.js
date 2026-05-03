@@ -926,53 +926,7 @@ class App {
             // (or a full audio reset) recovers without restarting the process,
             // so do not relaunch there.
             if (window.electronAPI?.platform === 'darwin') {
-                const now = Date.now();
-                const elapsed = now - this._lastHdmiReconnectResetTime;
-                if (elapsed < 30000) return;  // cooldown — same reconnect oscillation
-
-                // Skip auto-relaunch for the first 30s after app start to prevent
-                // infinite relaunch loops when HDMI is unstable around launch.
-                const timeSinceStart = Date.now() - this._appStartTime;
-                if (timeSinceStart < 30000) return;
-
-                // Arm cooldown only once we've actually committed to relaunching,
-                // so the startup-grace early-return does not erroneously block
-                // legitimate reconnects within the next 30 seconds.
-                this._lastHdmiReconnectResetTime = now;
-
-                // Save pipeline state before relaunch so user's work is preserved.
-                // Use pipelineManager.core to produce the serializable form (name/enabled/parameters),
-                // not audioManager.getPipelineState() which returns raw plugin instances.
-                try {
-                    const core = window.pipelineManager?.core;
-                    if (window.electronAPI?.savePipelineStateToFile && core && this.audioManager) {
-                        const serialize = (pl) => pl
-                            ? pl.map(p => core.getSerializablePluginState(p, false, false, false))
-                            : null;
-                        const state = {
-                            pipelineA: serialize(this.audioManager.pipelineA),
-                            pipelineB: serialize(this.audioManager.pipelineB),
-                            currentPipeline: this.audioManager.currentPipeline
-                        };
-                        await window.electronAPI.savePipelineStateToFile(state);
-                    } else if (!core) {
-                        console.error('[handleOutputDeviceChange] pipelineManager.core unavailable — skipping pipeline save before relaunch');
-                    }
-                } catch (err) {
-                    console.error('[handleOutputDeviceChange] Failed to save pipeline state before relaunch — user work may be lost:', err);
-                }
-
-                try {
-                    if (window.electronAPI?.relaunchApp) {
-                        await window.electronAPI.relaunchApp();
-                    } else {
-                        console.warn('[handleOutputDeviceChange] electronAPI.relaunchApp unavailable, falling back to window.location.reload()');
-                        window.location.reload();
-                    }
-                } catch (err) {
-                    console.error('[handleOutputDeviceChange] relaunchApp failed, falling back to reload:', err);
-                    window.location.reload();
-                }
+                await this._doMacosRelaunch();
                 return;
             }
 
@@ -1002,6 +956,63 @@ class App {
                     console.error('[handleOutputDeviceChange] reset(null) after reapply failure threw:', err);
                 }
             }
+        }
+    }
+
+    /**
+     * macOS-only HDMI reconnect recovery via full app relaunch.
+     * Called from both the devicechange handler and the device-poll fallback.
+     * Gated by the 30 s cooldown and the 30 s startup grace so that an unstable
+     * HDMI link around app launch cannot trigger an infinite relaunch loop.
+     * No-op outside the gate — caller may safely await without further checks.
+     */
+    async _doMacosRelaunch() {
+        const now = Date.now();
+        const elapsed = now - this._lastHdmiReconnectResetTime;
+        if (elapsed < 30000) return;  // cooldown — same reconnect oscillation
+
+        // Skip auto-relaunch for the first 30 s after app start to prevent
+        // infinite relaunch loops when HDMI is unstable around launch.
+        const timeSinceStart = Date.now() - this._appStartTime;
+        if (timeSinceStart < 30000) return;
+
+        // Arm cooldown only once we've actually committed to relaunching,
+        // so the startup-grace early-return does not erroneously block
+        // legitimate reconnects within the next 30 seconds.
+        this._lastHdmiReconnectResetTime = now;
+
+        // Save pipeline state before relaunch so user's work is preserved.
+        // Use pipelineManager.core to produce the serializable form (name/enabled/parameters),
+        // not audioManager.getPipelineState() which returns raw plugin instances.
+        try {
+            const core = window.pipelineManager?.core;
+            if (window.electronAPI?.savePipelineStateToFile && core && this.audioManager) {
+                const serialize = (pl) => pl
+                    ? pl.map(p => core.getSerializablePluginState(p, false, false, false))
+                    : null;
+                const state = {
+                    pipelineA: serialize(this.audioManager.pipelineA),
+                    pipelineB: serialize(this.audioManager.pipelineB),
+                    currentPipeline: this.audioManager.currentPipeline
+                };
+                await window.electronAPI.savePipelineStateToFile(state);
+            } else if (!core) {
+                console.error('[_doMacosRelaunch] pipelineManager.core unavailable — skipping pipeline save before relaunch');
+            }
+        } catch (err) {
+            console.error('[_doMacosRelaunch] Failed to save pipeline state before relaunch — user work may be lost:', err);
+        }
+
+        try {
+            if (window.electronAPI?.relaunchApp) {
+                await window.electronAPI.relaunchApp();
+            } else {
+                console.warn('[_doMacosRelaunch] electronAPI.relaunchApp unavailable, falling back to window.location.reload()');
+                window.location.reload();
+            }
+        } catch (err) {
+            console.error('[_doMacosRelaunch] relaunchApp failed, falling back to reload:', err);
+            window.location.reload();
         }
     }
 

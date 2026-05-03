@@ -257,9 +257,17 @@ export class AudioIOManager {
                     if (window.electronIntegration?.isElectronEnvironment?.()) {
                         this.startDevicePoll(
                             () => window.electronIntegration.loadAudioPreferences(),
-                            // Pass null so _doReset does not call saveAudioPreferences, which would
-                            // schedule a mainWindow.reload() and undo the recovery in progress.
-                            () => window.audioManager?.reset(null) ?? Promise.resolve(),
+                            // On macOS HDMI (audioContextSinkMode), reset(null) cannot recover —
+                            // CoreAudio renderer needs full process restart.  Defer to App's
+                            // macOS relaunch handler (which is gated by cooldown + startup grace).
+                            // Otherwise pass null so _doReset does not call saveAudioPreferences,
+                            // which would schedule a mainWindow.reload() and undo the recovery.
+                            () => {
+                                if (window.electronAPI?.platform === 'darwin' && window.app?._doMacosRelaunch) {
+                                    return window.app._doMacosRelaunch();
+                                }
+                                return window.audioManager?.reset(null) ?? Promise.resolve();
+                            },
                             false
                         );
                     }
@@ -492,9 +500,16 @@ export class AudioIOManager {
                     : false;
                 this.startDevicePoll(
                     () => window.electronIntegration.loadAudioPreferences(),
-                    // Pass null so _doReset does not call saveAudioPreferences, which would
-                    // schedule a mainWindow.reload() and undo the recovery in progress.
-                    () => window.audioManager?.reset(null) ?? Promise.resolve(),
+                    // On macOS, reset(null) cannot recover from stuck CoreAudio state —
+                    // route to App's macOS relaunch handler instead (gated by cooldown +
+                    // startup grace).  Otherwise pass null so _doReset does not call
+                    // saveAudioPreferences, which would schedule a mainWindow.reload().
+                    () => {
+                        if (window.electronAPI?.platform === 'darwin' && window.app?._doMacosRelaunch) {
+                            return window.app._doMacosRelaunch();
+                        }
+                        return window.audioManager?.reset(null) ?? Promise.resolve();
+                    },
                     pollInitiallyAbsent
                 );
             }
@@ -679,6 +694,16 @@ export class AudioIOManager {
     }
 
     async _pollTick(getPrefs, onReset) {
+        // On macOS, skip the poll's recovery actions during the 30 s startup grace.
+        // The setSinkId toggle / reset path can hang on stuck CoreAudio HDMI state and
+        // App._doMacosRelaunch is gated by the same grace window — without this gate,
+        // the poll would fire reset/toggle every 4 s and produce an infinite loop /
+        // freeze when HDMI is reconnected within the first 30 s after app launch.
+        if (window.electronAPI?.platform === 'darwin' && window.app?._appStartTime) {
+            const elapsed = Date.now() - window.app._appStartTime;
+            if (elapsed < 30000) return;
+        }
+
         let prefs;
         try { prefs = await getPrefs(); } catch (e) {
             console.warn('[_pollTick] Failed to load audio preferences:', e.message);
