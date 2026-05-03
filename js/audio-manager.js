@@ -234,27 +234,21 @@ export class AudioManager {
             if (contextResult) {
                 return contextResult;
             }
-
             // Initialize audio input
             const inputResult = await this.ioManager.initAudioInput();
             // No need to log input result
-
             // Initialize audio output
             const outputResult = await this.ioManager.initAudioOutput();
             if (outputResult) {
                 return outputResult;
             }
-
             // Note: We don't build the pipeline here anymore
             // That will be done in initializeAudioWorklet after GUI is fully rendered
-
             // Resume context if suspended
             await this.contextManager.resumeAudioContext();
-
             // Update exposed properties for backward compatibility
             // Note: workletNode will be null at this point
             this.updateExposedProperties();
-
             // Return any input error (like microphone access denied)
             // This allows the app to continue with file playback even if mic access is denied
             return inputResult || '';
