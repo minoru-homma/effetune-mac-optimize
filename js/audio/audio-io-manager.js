@@ -1,4 +1,12 @@
 /**
+ * Prefix used to identify the non-fatal mic-denied warning returned by initAudioInput().
+ * Callers (e.g. AudioManager._doReset) test against this prefix to distinguish a
+ * recoverable mic-permission failure from a fatal context/output failure.  Keep this
+ * exported so the prefix and the message stay coupled.
+ */
+export const MIC_DENIED_PREFIX = 'Audio Error: Microphone access denied';
+
+/**
  * AudioIOManager - Manages audio input and output devices
  */
 export class AudioIOManager {
@@ -133,7 +141,7 @@ export class AudioIOManager {
                 // Store the error message if microphone access was denied, but don't return it yet
                 // This allows us to continue setting up the audio nodes for playback
                 if (!usingMicrophoneInput) {
-                    microphoneError = 'Audio Error: Microphone access denied. Music file playback mode will still work.';
+                    microphoneError = `${MIC_DENIED_PREFIX}. Music file playback mode will still work.`;
                 }
             }
             

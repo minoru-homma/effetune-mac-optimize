@@ -1,5 +1,5 @@
 import { AudioContextManager } from './audio/audio-context-manager.js';
-import { AudioIOManager } from './audio/audio-io-manager.js';
+import { AudioIOManager, MIC_DENIED_PREFIX } from './audio/audio-io-manager.js';
 import { PipelineProcessor } from './audio/pipeline-processor.js';
 import { OfflineProcessor } from './audio/offline-processor.js';
 import { AudioEncoder } from './audio/audio-encoder.js';
@@ -389,8 +389,9 @@ export class AudioManager {
         if (audioErr) {
             // initAudio() can return either a fatal context/output failure or a
             // non-fatal mic-denied warning (file playback still works).  Only the
-            // mic-denied path is non-fatal — recognised by its exact prefix.
-            const isMicDenied = audioErr.startsWith('Audio Error: Microphone access denied');
+            // mic-denied path is non-fatal — recognised via the shared MIC_DENIED_PREFIX
+            // constant so this stays in sync if the message is ever rephrased.
+            const isMicDenied = audioErr.startsWith(MIC_DENIED_PREFIX);
             if (!isMicDenied) {
                 console.error('[AudioManager._doReset] initAudio failed:', audioErr);
                 return '';

@@ -963,6 +963,7 @@ class App {
                     if (window.electronAPI?.relaunchApp) {
                         await window.electronAPI.relaunchApp();
                     } else {
+                        console.warn('[handleOutputDeviceChange] electronAPI.relaunchApp unavailable, falling back to window.location.reload()');
                         window.location.reload();
                     }
                 } catch (err) {
@@ -978,6 +979,7 @@ class App {
             // after the device disappeared and reappeared.
             const success = await this.audioManager.ioManager.reapplyOutputDevice(activeDeviceId);
             if (!success) {
+                console.warn('[handleOutputDeviceChange] reapplyOutputDevice failed on non-macOS HDMI reconnect, falling back to full reset');
                 try {
                     await this.audioManager.reset(null);
                 } catch (err) {
@@ -990,6 +992,7 @@ class App {
         if (currentSink !== activeDeviceId) {
             const success = await this.audioManager.ioManager.reapplyOutputDevice(activeDeviceId);
             if (!success) {
+                console.warn('[handleOutputDeviceChange] reapplyOutputDevice failed on sinkId mismatch, falling back to full reset');
                 try {
                     await this.audioManager.reset(null);
                 } catch (err) {
