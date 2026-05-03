@@ -641,10 +641,16 @@ export class AudioIOManager {
      * @returns {Promise<boolean>} Success status
      */
     async reapplyOutputDevice(deviceId) {
+        // Use a shorter timeout (3 s) for runtime reapply than the 10 s used at init,
+        // so that macOS HDMI stuck states fail fast and route to the relaunch fallback
+        // instead of leaving the UI unresponsive for 10 s during multi-display flux.
+        const RUNTIME_SETSINK_TIMEOUT_MS = 3000;
         const ctx = this.contextManager?.audioContext;
         if (this.audioContextSinkMode && typeof ctx?.setSinkId === 'function') {
             try {
-                await ctx.setSinkId(deviceId);
+                // setSinkId can hang indefinitely on macOS when HDMI is in a
+                // re-re-connect / multi-display flux state — use the timeout wrapper.
+                await this._setSinkIdWithTimeout(ctx, deviceId, RUNTIME_SETSINK_TIMEOUT_MS);
                 this.currentOutputDeviceId = deviceId;
                 console.log('Reapplied output device (ctx):', deviceId);
                 return true;
@@ -657,7 +663,8 @@ export class AudioIOManager {
             return false;
         }
         try {
-            await this.audioElement.setSinkId(deviceId);
+            // Same hang risk on the audio-element renderer path — wrap with timeout.
+            await this._setSinkIdWithTimeout(this.audioElement, deviceId, RUNTIME_SETSINK_TIMEOUT_MS);
             this.currentOutputDeviceId = deviceId;
             if (this.destinationNode && this.destinationNode.stream) {
                 this.audioElement.srcObject = this.destinationNode.stream;
@@ -792,11 +799,15 @@ export class AudioIOManager {
     }
 
     _setSinkIdWithTimeout(target, sinkId, ms = 10000) {
+        let timerId;
         return Promise.race([
-            target.setSinkId(sinkId),
-            new Promise((_, reject) =>
-                setTimeout(() => reject(new Error(`setSinkId('${sinkId}') timed out`)), ms)
-            )
+            target.setSinkId(sinkId).finally(() => clearTimeout(timerId)),
+            new Promise((_, reject) => {
+                timerId = setTimeout(
+                    () => reject(new Error(`setSinkId('${sinkId}') timed out after ${ms}ms`)),
+                    ms
+                );
+            })
         ]);
     }
 

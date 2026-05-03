@@ -949,11 +949,19 @@ class App {
         if (currentSink !== activeDeviceId) {
             const success = await this.audioManager.ioManager.reapplyOutputDevice(activeDeviceId);
             if (!success) {
-                console.warn('[handleOutputDeviceChange] reapplyOutputDevice failed on sinkId mismatch, falling back to full reset');
-                try {
-                    await this.audioManager.reset(null);
-                } catch (err) {
-                    console.error('[handleOutputDeviceChange] reset(null) after reapply failure threw:', err);
+                if (window.electronAPI?.platform === 'darwin') {
+                    // On macOS, sinkId reapply failure usually means CoreAudio is in a
+                    // stuck HDMI state — reset(null) cannot recover and tends to hang.
+                    // Defer to the relaunch handler (gated by cooldown + startup grace).
+                    console.warn('[handleOutputDeviceChange] reapplyOutputDevice failed on sinkId mismatch, deferring to macOS relaunch');
+                    await this._doMacosRelaunch();
+                } else {
+                    console.warn('[handleOutputDeviceChange] reapplyOutputDevice failed on sinkId mismatch, falling back to full reset');
+                    try {
+                        await this.audioManager.reset(null);
+                    } catch (err) {
+                        console.error('[handleOutputDeviceChange] reset(null) after reapply failure threw:', err);
+                    }
                 }
             }
         }
