@@ -96,11 +96,18 @@ export class AudioContextManager {
                         );
                     } else if (state === 'closed') {
                         console.warn('[AudioContext] closed unexpectedly');
-                        if (window.audioManager) {
-                            // AudioContext closed unexpectedly (e.g. HDMI pulled) — trigger
-                            // full reinit. Pass null so _doReset does not call saveAudioPreferences,
-                            // which would schedule a mainWindow.reload() 3 s later and undo the reset.
-                            // Preferences are already persisted; the device poll will re-apply them.
+                        // On macOS, ctx going to 'closed' typically means HDMI failed.
+                        // reset(null) cannot recover — CoreAudio renderer needs a full
+                        // process restart — and reset(null) → closeAudioContext can
+                        // itself hang on the same stuck state, looping.  Defer to App's
+                        // macOS relaunch handler (gated by cooldown + startup grace).
+                        if (window.electronAPI?.platform === 'darwin' && window.app?._doMacosRelaunch) {
+                            window.app._doMacosRelaunch().catch(err =>
+                                console.error('[AudioContext] _doMacosRelaunch from closed-state failed:', err)
+                            );
+                        } else if (window.audioManager) {
+                            // Other platforms: full reinit. Pass null so _doReset does not call
+                            // saveAudioPreferences (which would schedule mainWindow.reload()).
                             window.audioManager.reset(null).catch(err =>
                                 console.error('[AudioContext] reset after closed-state failed:', err)
                             );
@@ -319,7 +326,24 @@ export class AudioContextManager {
         if (this.audioContext) {
             // Detach handler before close to prevent spurious 'closed' state trigger
             this.audioContext.onstatechange = null;
-            await this.audioContext.close();
+            // close() can hang indefinitely on macOS when HDMI is in a stuck CoreAudio
+            // state (the renderer cannot release the device).  Apply a 5 s timeout and
+            // continue regardless so the app does not freeze.  Any leaked resources are
+            // reclaimed when the new context is created or when app.relaunch() runs.
+            let closeTimerId;
+            try {
+                await Promise.race([
+                    this.audioContext.close().finally(() => clearTimeout(closeTimerId)),
+                    new Promise((_, reject) => {
+                        closeTimerId = setTimeout(
+                            () => reject(new Error('audioContext.close timed out after 5 s')),
+                            5000
+                        );
+                    })
+                ]);
+            } catch (err) {
+                console.warn('[closeAudioContext] close() failed or timed out:', err.message);
+            }
             this.audioContext = null;
             window.audioContext = null;
         }
