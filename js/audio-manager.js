@@ -372,19 +372,30 @@ export class AudioManager {
         }
     }
 
+    /**
+     * Internal reset implementation — serialised by reset()'s in-progress guard.
+     * Tears down the current audio graph, optionally persists new preferences,
+     * then rebuilds context → worklet → pipeline.
+     */
     async _doReset(audioPreferences = null) {
+        // Clean up audio I/O
         this.ioManager.cleanupAudio();
+
+        // Close audio context
         await this.contextManager.closeAudioContext();
 
+        // If audio preferences were provided, save them first
         if (audioPreferences && window.electronAPI && window.electronIntegration) {
             await window.electronIntegration.saveAudioPreferences(audioPreferences);
         }
 
+        // Skip initialization if we're being called from the sample rate adjustment code
         if (this.contextManager.getSkipAudioInitDuringSampleRateChange()) {
             this.contextManager.setSkipAudioInitDuringSampleRateChange(false);
             return '';
         }
 
+        // Initialize audio (context + input + output)
         const audioErr = await this.initAudio();
         if (audioErr) {
             // initAudio() can return either a fatal context/output failure or a
@@ -398,9 +409,15 @@ export class AudioManager {
             }
             console.warn('[AudioManager._doReset] initAudio non-fatal warning:', audioErr);
         }
+
+        // Set up the AudioWorklet that hosts the plugin chain
         const workletErr = await this.initializeAudioWorklet();
         if (workletErr) console.error('[AudioManager._doReset] initializeAudioWorklet failed:', workletErr);
+
+        // Resume in case the new context started suspended (autoplay policy, HDMI race, etc.)
         await this.contextManager.resumeAudioContext();
+
+        // Make sure pipeline is rebuilt with the new audio context
         const pipelineErr = await this.rebuildPipeline(true);
         if (pipelineErr) console.error('[AudioManager._doReset] rebuildPipeline failed:', pipelineErr);
 
