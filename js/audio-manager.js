@@ -387,11 +387,12 @@ export class AudioManager {
 
         const audioErr = await this.initAudio();
         if (audioErr) {
-            // initAudio() also returns a non-fatal message when mic access is denied
-            // but the AudioContext and output were created successfully (music-file playback
-            // still works).  Only abort if no AudioContext was created at all.
-            if (!this.contextManager.audioContext) {
-                console.error('[AudioManager._doReset] initAudio failed (no context):', audioErr);
+            // initAudio() can return either a fatal context/output failure or a
+            // non-fatal mic-denied warning (file playback still works).  Only the
+            // mic-denied path is non-fatal — recognised by its exact prefix.
+            const isMicDenied = audioErr.startsWith('Audio Error: Microphone access denied');
+            if (!isMicDenied) {
+                console.error('[AudioManager._doReset] initAudio failed:', audioErr);
                 return '';
             }
             console.warn('[AudioManager._doReset] initAudio non-fatal warning:', audioErr);

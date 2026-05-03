@@ -4,6 +4,10 @@ const { contextBridge, ipcRenderer } = require('electron');
 // the ipcRenderer without exposing the entire object
 contextBridge.exposeInMainWorld(
   'electronAPI', {
+    // Platform identifier ('darwin' | 'win32' | 'linux'). Synchronous so the
+    // renderer can branch on it without an async round-trip.
+    platform: process.platform,
+
     // File system operations
     showSaveDialog: (options) => ipcRenderer.invoke('show-save-dialog', options),
     showOpenDialog: (options) => ipcRenderer.invoke('show-open-dialog', options),

@@ -440,7 +440,9 @@ export class AudioIOManager {
                     : false;
                 this.startDevicePoll(
                     () => window.electronIntegration.loadAudioPreferences(),
-                    (prefs) => window.audioManager?.reset(prefs) ?? Promise.resolve(),
+                    // Pass null so _doReset does not call saveAudioPreferences, which would
+                    // schedule a mainWindow.reload() and undo the recovery in progress.
+                    () => window.audioManager?.reset(null) ?? Promise.resolve(),
                     pollInitiallyAbsent
                 );
             }

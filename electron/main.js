@@ -18,12 +18,17 @@ constants.setAppVersion(appVersion);
 let tray = null;
 let isAppQuitting = false;
 
-// Tell Chromium to auto-approve getUserMedia() without showing its own
-// permission UI.  The actual hardware access still goes through macOS TCC,
+// macOS only: tell Chromium to auto-approve getUserMedia() without showing its
+// own permission UI.  The actual hardware access still goes through macOS TCC,
 // so the system-level microphone permission is still respected and the
 // menu-bar indicator appears when audio is captured.
+// Not applied on Windows/Linux because those platforms have no equivalent
+// system-level dialog, so silently auto-granting media-stream access there
+// would weaken the security posture without a corresponding benefit.
 // Must be set before app.ready.
-app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
+if (process.platform === 'darwin') {
+  app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
+}
 
 // Set up logging to file for debugging (disabled for release)
 function setupFileLogging() {

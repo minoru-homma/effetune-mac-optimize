@@ -917,57 +917,85 @@ class App {
         }
 
         if (wasAbsent || foundByLabel) {
-            const now = Date.now();
-            const elapsed = now - this._lastHdmiReconnectResetTime;
-            if (elapsed < 30000) return;  // cooldown — same reconnect oscillation
+            // The full app-relaunch path is a macOS-specific workaround for
+            // CoreAudio HDMI reconnect — Chromium's renderer must be killed
+            // before audio can be restored.  On Windows/Linux, sinkId reapply
+            // (or a full audio reset) recovers without restarting the process,
+            // so do not relaunch there.
+            if (window.electronAPI?.platform === 'darwin') {
+                const now = Date.now();
+                const elapsed = now - this._lastHdmiReconnectResetTime;
+                if (elapsed < 30000) return;  // cooldown — same reconnect oscillation
 
-            // On macOS, the only reliable recovery for HDMI reconnect is a full
-            // app relaunch (renderer-process restart).  Page reload, AudioContext
-            // recreation, sinkId toggling, etc. all fail to restore audio.
-            // Skip auto-relaunch for the first 30s after app start to prevent
-            // infinite relaunch loops when HDMI is unstable around launch.
-            const timeSinceStart = Date.now() - this._appStartTime;
-            if (timeSinceStart < 30000) return;
+                // Skip auto-relaunch for the first 30s after app start to prevent
+                // infinite relaunch loops when HDMI is unstable around launch.
+                const timeSinceStart = Date.now() - this._appStartTime;
+                if (timeSinceStart < 30000) return;
 
-            // Arm cooldown only once we've actually committed to relaunching,
-            // so the startup-grace early-return does not erroneously block
-            // legitimate reconnects within the next 30 seconds.
-            this._lastHdmiReconnectResetTime = now;
+                // Arm cooldown only once we've actually committed to relaunching,
+                // so the startup-grace early-return does not erroneously block
+                // legitimate reconnects within the next 30 seconds.
+                this._lastHdmiReconnectResetTime = now;
 
-            // Save pipeline state before relaunch so user's work is preserved.
-            // Use pipelineManager.core to produce the serializable form (name/enabled/parameters),
-            // not audioManager.getPipelineState() which returns raw plugin instances.
-            try {
-                const core = window.pipelineManager?.core;
-                if (window.electronAPI?.savePipelineStateToFile && core && this.audioManager) {
-                    const serialize = (pl) => pl
-                        ? pl.map(p => core.getSerializablePluginState(p, false, false, false))
-                        : null;
-                    const state = {
-                        pipelineA: serialize(this.audioManager.pipelineA),
-                        pipelineB: serialize(this.audioManager.pipelineB),
-                        currentPipeline: this.audioManager.currentPipeline
-                    };
-                    await window.electronAPI.savePipelineStateToFile(state);
+                // Save pipeline state before relaunch so user's work is preserved.
+                // Use pipelineManager.core to produce the serializable form (name/enabled/parameters),
+                // not audioManager.getPipelineState() which returns raw plugin instances.
+                try {
+                    const core = window.pipelineManager?.core;
+                    if (window.electronAPI?.savePipelineStateToFile && core && this.audioManager) {
+                        const serialize = (pl) => pl
+                            ? pl.map(p => core.getSerializablePluginState(p, false, false, false))
+                            : null;
+                        const state = {
+                            pipelineA: serialize(this.audioManager.pipelineA),
+                            pipelineB: serialize(this.audioManager.pipelineB),
+                            currentPipeline: this.audioManager.currentPipeline
+                        };
+                        await window.electronAPI.savePipelineStateToFile(state);
+                    } else if (!core) {
+                        console.error('[handleOutputDeviceChange] pipelineManager.core unavailable — skipping pipeline save before relaunch');
+                    }
+                } catch (err) {
+                    console.error('[handleOutputDeviceChange] Failed to save pipeline state before relaunch — user work may be lost:', err);
                 }
-            } catch (err) {
-                console.error('[handleOutputDeviceChange] Failed to save pipeline state before relaunch — user work may be lost:', err);
-            }
 
-            try {
-                if (window.electronAPI?.relaunchApp) {
-                    await window.electronAPI.relaunchApp();
-                } else {
+                try {
+                    if (window.electronAPI?.relaunchApp) {
+                        await window.electronAPI.relaunchApp();
+                    } else {
+                        window.location.reload();
+                    }
+                } catch (err) {
+                    console.error('[handleOutputDeviceChange] relaunchApp failed, falling back to reload:', err);
                     window.location.reload();
                 }
-            } catch (err) {
-                console.error('[handleOutputDeviceChange] relaunchApp failed, falling back to reload:', err);
-                window.location.reload();
+                return;
+            }
+
+            // Non-macOS: sinkId reapply is sufficient on Windows/Linux.
+            // Force a reapply even when the cached sinkId still matches, since
+            // on those platforms the underlying audio binding can become stale
+            // after the device disappeared and reappeared.
+            const success = await this.audioManager.ioManager.reapplyOutputDevice(activeDeviceId);
+            if (!success) {
+                try {
+                    await this.audioManager.reset(null);
+                } catch (err) {
+                    console.error('[handleOutputDeviceChange] reset(null) after reapply failure threw:', err);
+                }
             }
             return;
-        } else if (currentSink !== activeDeviceId) {
+        }
+
+        if (currentSink !== activeDeviceId) {
             const success = await this.audioManager.ioManager.reapplyOutputDevice(activeDeviceId);
-            if (!success) await this.audioManager.reset(null);
+            if (!success) {
+                try {
+                    await this.audioManager.reset(null);
+                } catch (err) {
+                    console.error('[handleOutputDeviceChange] reset(null) after reapply failure threw:', err);
+                }
+            }
         }
     }
 
