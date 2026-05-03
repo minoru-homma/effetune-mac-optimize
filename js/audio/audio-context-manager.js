@@ -204,7 +204,20 @@ export class AudioContextManager {
             // Check if AudioWorklet is supported
             if (this.audioContext.audioWorklet) {
                 try {
-                    await this.audioContext.audioWorklet.addModule(`${basePath}/plugins/audio-processor.js`);
+                    // addModule can hang on macOS audio-system flux; apply a 5 s timeout
+                    // so the recovery path does not stall here.
+                    let addModuleTimerId;
+                    await Promise.race([
+                        this.audioContext.audioWorklet
+                            .addModule(`${basePath}/plugins/audio-processor.js`)
+                            .finally(() => clearTimeout(addModuleTimerId)),
+                        new Promise((_, reject) => {
+                            addModuleTimerId = setTimeout(
+                                () => reject(new Error('audioWorklet.addModule timed out after 5000ms')),
+                                5000
+                            );
+                        })
+                    ]);
                 } catch (error) {
                     // If module is already registered (reconnect recovery), ignore and continue
                     if (!error.message?.includes('already')) {

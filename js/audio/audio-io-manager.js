@@ -77,7 +77,7 @@ export class AudioIOManager {
             // Try to get user media with audio constraints
             let lastMicError = null;
             try {
-                this.stream = await navigator.mediaDevices.getUserMedia({
+                this.stream = await this._getUserMediaWithTimeout({
                     audio: audioConstraints
                 });
             } catch (error) {
@@ -87,7 +87,7 @@ export class AudioIOManager {
                     console.warn('Failed to use saved audio input device, falling back to default:', error.name, error.message);
                     delete audioConstraints.deviceId;
                     try {
-                        this.stream = await navigator.mediaDevices.getUserMedia({
+                        this.stream = await this._getUserMediaWithTimeout({
                             audio: audioConstraints
                         });
                         lastMicError = null;
@@ -102,7 +102,7 @@ export class AudioIOManager {
                                 try {
                                     await window.electronAPI.clearMicrophonePermission();
                                     // Try one more time after clearing permissions
-                                    this.stream = await navigator.mediaDevices.getUserMedia({
+                                    this.stream = await this._getUserMediaWithTimeout({
                                         audio: audioConstraints
                                     });
                                     lastMicError = null;
@@ -127,7 +127,7 @@ export class AudioIOManager {
                         try {
                             await window.electronAPI.clearMicrophonePermission();
                             // Try one more time after clearing permissions
-                            this.stream = await navigator.mediaDevices.getUserMedia({
+                            this.stream = await this._getUserMediaWithTimeout({
                                 audio: audioConstraints
                             });
                             lastMicError = null;
@@ -250,7 +250,10 @@ export class AudioIOManager {
                     this.destinationNode = null; // use audioContext.destination via connectAudioNodes fallback
                     this.currentOutputDeviceId = preferences.outputDeviceId;
                     try {
-                        await this._setSinkIdWithTimeout(this.contextManager.audioContext, preferences.outputDeviceId);
+                        // 3 s timeout instead of the default 10 s — on macOS HDMI flux,
+                        // setSinkId can hang and we want to fail fast and continue with
+                        // a usable (default-sink) audio context.
+                        await this._setSinkIdWithTimeout(this.contextManager.audioContext, preferences.outputDeviceId, 3000);
                     } catch (e) {
                         console.warn('[audioCtxSink] setSinkId failed:', e.message);
                     }
@@ -805,6 +808,25 @@ export class AudioIOManager {
             new Promise((_, reject) => {
                 timerId = setTimeout(
                     () => reject(new Error(`setSinkId('${sinkId}') timed out after ${ms}ms`)),
+                    ms
+                );
+            })
+        ]);
+    }
+
+    /**
+     * getUserMedia with timeout — on macOS, getUserMedia can hang indefinitely when
+     * the audio system is in flux (HDMI re-re-connect, multi-display).  Apply a 5 s
+     * timeout so the renderer can fall back to silent-source mode and proceed instead
+     * of freezing.
+     */
+    _getUserMediaWithTimeout(constraints, ms = 5000) {
+        let timerId;
+        return Promise.race([
+            navigator.mediaDevices.getUserMedia(constraints).finally(() => clearTimeout(timerId)),
+            new Promise((_, reject) => {
+                timerId = setTimeout(
+                    () => reject(new Error(`getUserMedia timed out after ${ms}ms`)),
                     ms
                 );
             })

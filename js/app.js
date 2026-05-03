@@ -977,7 +977,7 @@ class App {
     async _doMacosRelaunch() {
         const now = Date.now();
         const elapsed = now - this._lastHdmiReconnectResetTime;
-        if (elapsed < 30000) return;  // cooldown — same reconnect oscillation
+        if (elapsed < 10000) return;  // cooldown — same reconnect oscillation (10 s, was 30 s)
 
         // Skip auto-relaunch for the first 30 s after app start to prevent
         // infinite relaunch loops when HDMI is unstable around launch.
