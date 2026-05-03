@@ -234,23 +234,23 @@ export class AudioManager {
             if (contextResult) {
                 return contextResult;
             }
-
+            
             // Initialize audio input
             const inputResult = await this.ioManager.initAudioInput();
             // No need to log input result
-
+            
             // Initialize audio output
             const outputResult = await this.ioManager.initAudioOutput();
             if (outputResult) {
                 return outputResult;
             }
-
+            
             // Note: We don't build the pipeline here anymore
             // That will be done in initializeAudioWorklet after GUI is fully rendered
-
+            
             // Resume context if suspended
             await this.contextManager.resumeAudioContext();
-
+            
             // Update exposed properties for backward compatibility
             // Note: workletNode will be null at this point
             this.updateExposedProperties();
@@ -397,21 +397,21 @@ export class AudioManager {
     async _doReset(audioPreferences = null) {
         // Clean up audio I/O
         this.ioManager.cleanupAudio();
-
+        
         // Close audio context
         await this.contextManager.closeAudioContext();
-
+        
         // If audio preferences were provided, save them first
         if (audioPreferences && window.electronAPI && window.electronIntegration) {
             await window.electronIntegration.saveAudioPreferences(audioPreferences);
         }
-
+        
         // Skip initialization if we're being called from the sample rate adjustment code
         if (this.contextManager.getSkipAudioInitDuringSampleRateChange()) {
             this.contextManager.setSkipAudioInitDuringSampleRateChange(false);
             return '';
         }
-
+        
         // Initialize audio (context + input + output)
         const audioErr = await this.initAudio();
         if (audioErr) {
@@ -426,18 +426,18 @@ export class AudioManager {
             }
             console.warn('[AudioManager._doReset] initAudio non-fatal warning:', audioErr);
         }
-
+        
         // Set up the AudioWorklet that hosts the plugin chain
         const workletErr = await this.initializeAudioWorklet();
         if (workletErr) console.error('[AudioManager._doReset] initializeAudioWorklet failed:', workletErr);
-
+        
         // Resume in case the new context started suspended (autoplay policy, HDMI race, etc.)
         await this.contextManager.resumeAudioContext();
-
+        
         // Make sure pipeline is rebuilt with the new audio context
         const pipelineErr = await this.rebuildPipeline(true);
         if (pipelineErr) console.error('[AudioManager._doReset] rebuildPipeline failed:', pipelineErr);
-
+        
         return '';
     }
     

@@ -86,7 +86,7 @@ function createWindow() {
   constants.setMainWindow(mainWindow);
   ipcHandlers.setMainWindow(mainWindow);
   fileHandlers.setMainWindow(mainWindow);
-
+  
   // Allow renderer to access microphone via getUserMedia on file:// origin.
   // Without both handlers, Chromium falls back to its default content-settings
   // which deny media on file:// pages before the request handler is even called.

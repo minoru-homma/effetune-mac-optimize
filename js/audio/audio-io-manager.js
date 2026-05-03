@@ -481,7 +481,7 @@ export class AudioIOManager {
                 // Store reference to remove on cleanup
                 this.silenceNode = silenceNode;
             }
-
+            
             // Start polling fallback for HDMI reconnection (macOS devicechange unreliable)
             if (window.electronIntegration?.isElectronEnvironment?.() && this.audioElement) {
                 // If the audio element ended up on a different device than preferred (fallback after
