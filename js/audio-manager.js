@@ -385,10 +385,16 @@ export class AudioManager {
             return '';
         }
 
-        await this.initAudio();
-        await this.initializeAudioWorklet();
+        const audioErr = await this.initAudio();
+        if (audioErr) {
+            console.error('[AudioManager._doReset] initAudio failed:', audioErr);
+            return '';
+        }
+        const workletErr = await this.initializeAudioWorklet();
+        if (workletErr) console.error('[AudioManager._doReset] initializeAudioWorklet failed:', workletErr);
         await this.contextManager.resumeAudioContext();
-        await this.rebuildPipeline(true);
+        const pipelineErr = await this.rebuildPipeline(true);
+        if (pipelineErr) console.error('[AudioManager._doReset] rebuildPipeline failed:', pipelineErr);
 
         return '';
     }

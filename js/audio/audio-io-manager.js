@@ -624,11 +624,17 @@ export class AudioIOManager {
 
     async _pollTick(getPrefs, onReset) {
         let prefs;
-        try { prefs = await getPrefs(); } catch (e) { return; }
+        try { prefs = await getPrefs(); } catch (e) {
+            console.warn('[_pollTick] Failed to load audio preferences:', e.message);
+            return;
+        }
         if (!prefs || !prefs.outputDeviceId) return;
 
         let devices;
-        try { devices = await navigator.mediaDevices.enumerateDevices(); } catch (e) { return; }
+        try { devices = await navigator.mediaDevices.enumerateDevices(); } catch (e) {
+            console.warn('[_pollTick] Failed to enumerate devices:', e.message);
+            return;
+        }
 
         const outputs = devices.filter(d => d.kind === 'audiooutput');
 
@@ -689,10 +695,14 @@ export class AudioIOManager {
                     await el.play().catch(() => {});
                 }
             } catch (e) {
+                console.warn('[_pollTick] toggle+resume failed, falling back to full reset:', e.message ?? e);
                 await onReset(updatedPrefs);
             }
         } else if (!this.audioContextSinkMode && (el.paused || el.readyState < 2)) {
-            try { await el.play(); } catch (e) { await onReset(prefs); }
+            try { await el.play(); } catch (e) {
+                console.warn('[_pollTick] el.play() failed, falling back to full reset:', e.message ?? e);
+                await onReset(prefs);
+            }
         }
     }
 

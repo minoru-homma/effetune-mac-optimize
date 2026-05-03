@@ -97,9 +97,17 @@ export class AudioContextManager {
                     } else if (state === 'closed') {
                         console.warn('[AudioContext] closed unexpectedly');
                         if (window.audioManager) {
+                            // AudioContext closed unexpectedly (e.g. HDMI pulled) — trigger
+                            // full reinit. Pass saved preferences so the output device is
+                            // re-applied; fall back to null on IPC failure.
                             window.electronIntegration?.loadAudioPreferences()
-                                .then(() => window.audioManager.reset(null))
-                                .catch(() => window.audioManager.reset(null));
+                                .then(prefs => window.audioManager.reset(prefs ?? null))
+                                .catch(err => {
+                                    console.warn('[AudioContext] Failed to load preferences for reset:', err);
+                                    window.audioManager.reset(null).catch(resetErr =>
+                                        console.error('[AudioContext] reset after closed-state failed:', resetErr)
+                                    );
+                                });
                         }
                     }
                 };
@@ -334,10 +342,14 @@ export class AudioContextManager {
             // that CoreAudio hasn't finished initialising yet.  Use a timeout so that
             // a reconnect-triggered reset never freezes the app.  The HDMI retry
             // mechanism will restore audio once the device is ready.
+            let timerId;
             await Promise.race([
-                this.audioContext.resume(),
-                new Promise(resolve => setTimeout(resolve, 10000))
+                this.audioContext.resume().finally(() => clearTimeout(timerId)),
+                new Promise(resolve => { timerId = setTimeout(resolve, 10000); })
             ]).catch(() => {});
+            if (this.audioContext?.state !== 'running') {
+                console.warn('[AudioContext] resumeAudioContext: context not running after resume attempt, state:', this.audioContext?.state);
+            }
         }
     }
     
