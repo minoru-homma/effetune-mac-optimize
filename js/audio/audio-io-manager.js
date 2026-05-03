@@ -205,7 +205,9 @@ export class AudioIOManager {
                     if (window.electronIntegration?.isElectronEnvironment?.()) {
                         this.startDevicePoll(
                             () => window.electronIntegration.loadAudioPreferences(),
-                            (prefs) => window.audioManager?.reset(prefs) ?? Promise.resolve(),
+                            // Pass null so _doReset does not call saveAudioPreferences, which would
+                            // schedule a mainWindow.reload() and undo the recovery in progress.
+                            () => window.audioManager?.reset(null) ?? Promise.resolve(),
                             false
                         );
                     }
@@ -667,7 +669,11 @@ export class AudioIOManager {
             if (wasAbsent || foundByLabel) {
                 await new Promise(resolve => setTimeout(resolve, 2000));
             }
-            await onReset(updatedPrefs);
+            try {
+                await onReset(updatedPrefs);
+            } catch (e) {
+                console.error('[_pollTick] onReset failed (sinkId mismatch path):', e.message ?? e);
+            }
         } else if (wasAbsent) {
             // sinkId is already correct after reconnect.
             // If the context is already running, the devicechange handler handled

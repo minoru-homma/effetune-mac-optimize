@@ -98,16 +98,12 @@ export class AudioContextManager {
                         console.warn('[AudioContext] closed unexpectedly');
                         if (window.audioManager) {
                             // AudioContext closed unexpectedly (e.g. HDMI pulled) — trigger
-                            // full reinit. Pass saved preferences so the output device is
-                            // re-applied; fall back to null on IPC failure.
-                            window.electronIntegration?.loadAudioPreferences()
-                                .then(prefs => window.audioManager.reset(prefs ?? null))
-                                .catch(err => {
-                                    console.warn('[AudioContext] Failed to load preferences for reset:', err);
-                                    window.audioManager.reset(null).catch(resetErr =>
-                                        console.error('[AudioContext] reset after closed-state failed:', resetErr)
-                                    );
-                                });
+                            // full reinit. Pass null so _doReset does not call saveAudioPreferences,
+                            // which would schedule a mainWindow.reload() 3 s later and undo the reset.
+                            // Preferences are already persisted; the device poll will re-apply them.
+                            window.audioManager.reset(null).catch(err =>
+                                console.error('[AudioContext] reset after closed-state failed:', err)
+                            );
                         }
                     }
                 };

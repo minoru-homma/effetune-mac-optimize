@@ -841,7 +841,13 @@ class App {
     }
 
     async _handleOutputDeviceChangeImpl() {
-        const prefs = await window.electronIntegration.loadAudioPreferences();
+        let prefs;
+        try {
+            prefs = await window.electronIntegration.loadAudioPreferences();
+        } catch (err) {
+            console.warn('[_handleOutputDeviceChangeImpl] Failed to load audio preferences:', err);
+            return;
+        }
         if (!prefs || !prefs.outputDeviceId) return;
 
         let devices;
@@ -883,9 +889,6 @@ class App {
             // during re-plug (state oscillation).  Debounce 3s and only reset if still absent.
             if (currentSink !== prefs.outputDeviceId) return;
 
-            // New disconnect cycle detected — clear cooldown so the next reconnect
-            // is handled as a fresh event even if it comes within 30 seconds.
-            this._lastHdmiReconnectResetTime = 0;
             if (this._disconnectDebounceTimer) clearTimeout(this._disconnectDebounceTimer);
             this._disconnectDebounceTimer = setTimeout(async () => {
                 this._disconnectDebounceTimer = null;
@@ -898,7 +901,11 @@ class App {
                 if (!stillAbsent) return;
                 // Confirmed long disconnect: reset to fallback
                 this._lastHdmiReconnectResetTime = 0;
-                await this.audioManager.reset(null);
+                try {
+                    await this.audioManager.reset(null);
+                } catch (err) {
+                    console.error('[disconnectDebounce] reset failed:', err);
+                }
             }, 3000);
             return;
         }
@@ -928,10 +935,19 @@ class App {
             this._lastHdmiReconnectResetTime = now;
 
             // Save pipeline state before relaunch so user's work is preserved.
-            // getPipelineState lives on audioManager (and uiManager), NOT on pipelineManager.
+            // Use pipelineManager.core to produce the serializable form (name/enabled/parameters),
+            // not audioManager.getPipelineState() which returns raw plugin instances.
             try {
-                if (window.electronAPI?.savePipelineStateToFile && this.audioManager?.getPipelineState) {
-                    const state = this.audioManager.getPipelineState();
+                const core = window.pipelineManager?.core;
+                if (window.electronAPI?.savePipelineStateToFile && core && this.audioManager) {
+                    const serialize = (pl) => pl
+                        ? pl.map(p => core.getSerializablePluginState(p, false, false, false))
+                        : null;
+                    const state = {
+                        pipelineA: serialize(this.audioManager.pipelineA),
+                        pipelineB: serialize(this.audioManager.pipelineB),
+                        currentPipeline: this.audioManager.currentPipeline
+                    };
                     await window.electronAPI.savePipelineStateToFile(state);
                 }
             } catch (err) {

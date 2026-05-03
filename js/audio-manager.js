@@ -387,8 +387,14 @@ export class AudioManager {
 
         const audioErr = await this.initAudio();
         if (audioErr) {
-            console.error('[AudioManager._doReset] initAudio failed:', audioErr);
-            return '';
+            // initAudio() also returns a non-fatal message when mic access is denied
+            // but the AudioContext and output were created successfully (music-file playback
+            // still works).  Only abort if no AudioContext was created at all.
+            if (!this.contextManager.audioContext) {
+                console.error('[AudioManager._doReset] initAudio failed (no context):', audioErr);
+                return '';
+            }
+            console.warn('[AudioManager._doReset] initAudio non-fatal warning:', audioErr);
         }
         const workletErr = await this.initializeAudioWorklet();
         if (workletErr) console.error('[AudioManager._doReset] initializeAudioWorklet failed:', workletErr);
