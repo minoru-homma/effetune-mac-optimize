@@ -204,8 +204,6 @@ class App {
 
         // HDMI reconnect throttling: timestamp of last reconnect handling (0 = never)
         this._lastHdmiReconnectResetTime = 0;
-        // Whether a wasAbsent handler is currently waiting (blocks concurrent sinkId reapply)
-        this._hdmiReconnectPending = false;
         // Debounce timer for disconnect: avoids immediate fallback reset during HDMI oscillation
         this._disconnectDebounceTimer = null;
         // Guard against concurrent handleOutputDeviceChange executions
@@ -899,7 +897,6 @@ class App {
                      (prefs.outputDeviceLabel && d.label === prefs.outputDeviceLabel)));
                 if (!stillAbsent) return;
                 // Confirmed long disconnect: reset to fallback
-                this._hdmiReconnectPending = false;
                 this._lastHdmiReconnectResetTime = 0;
                 await this.audioManager.reset(null);
             }, 3000);
@@ -953,16 +950,11 @@ class App {
             }
             return;
         } else if (currentSink !== activeDeviceId) {
-            if (this._hdmiReconnectPending) return;
             const success = await this.audioManager.ioManager.reapplyOutputDevice(activeDeviceId);
             if (!success) await this.audioManager.reset(null);
         }
     }
 
-    /**
-     * setSinkId with a timeout — setSinkId(deviceId) can hang indefinitely when
-     * CoreAudio hasn't finished initialising the HDMI device.
-     */
     /**
      * Process command line arguments after all initialization is complete
      * This method handles both preset files and music files passed via command line

@@ -24,9 +24,6 @@ export class AudioIOManager {
         this.currentOutputDeviceId = null;
         this._devicePollIntervalId = null;
         this._pollDeviceWasAbsent = false;
-        // Set true while a setSinkId toggle is in progress to prevent poll from
-        // misreading the transient empty sinkId and triggering a spurious reset.
-        this._toggleInProgress = false;
         // Guard against overlapping poll tick executions
         this._pollRunning = false;
     }
@@ -618,8 +615,6 @@ export class AudioIOManager {
         this._pollDeviceWasAbsent = initiallyAbsent;
         this._devicePollIntervalId = setInterval(async () => {
             if (!window.electronIntegration?.isElectronEnvironment?.()) return;
-            // Skip poll while a toggle is running to avoid misreading the transient empty sinkId
-            if (this._toggleInProgress) return;
             // Skip if a previous poll tick is still running (avoids stacking)
             if (this._pollRunning) return;
             this._pollRunning = true;
@@ -666,8 +661,6 @@ export class AudioIOManager {
             if (wasAbsent || foundByLabel) {
                 await new Promise(resolve => setTimeout(resolve, 2000));
             }
-            // Cancel stale HDMI retry timers that reference the old AudioContext
-            window._hdmiCancelRetries?.();
             await onReset(updatedPrefs);
         } else if (wasAbsent) {
             // sinkId is already correct after reconnect.
