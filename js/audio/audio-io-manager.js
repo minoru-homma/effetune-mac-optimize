@@ -92,8 +92,52 @@ export class AudioIOManager {
                         });
                         lastMicError = null;
                     } catch (innerError) {
-                        lastMicError = innerError;
-                        console.warn('Failed to get microphone access (default device):', innerError.name, innerError.message);
+                        // If permission is denied, try to clear permission overrides and ask again.
+                        // This recovers cases where Chromium's permission cache rejects despite
+                        // the user actually having granted access (commonly seen on Windows/Linux,
+                        // and on macOS ad-hoc signed builds where requestMicrophoneAccess returns false).
+                        if (innerError.name === 'NotAllowedError' || innerError.name === 'PermissionDeniedError') {
+                            if (window.electronAPI && window.electronAPI.clearMicrophonePermission) {
+                                console.log('Microphone permission denied, attempting to clear permission overrides');
+                                try {
+                                    await window.electronAPI.clearMicrophonePermission();
+                                    // Try one more time after clearing permissions
+                                    this.stream = await navigator.mediaDevices.getUserMedia({
+                                        audio: audioConstraints
+                                    });
+                                    lastMicError = null;
+                                } catch (finalError) {
+                                    lastMicError = finalError;
+                                    console.warn('Failed to get microphone access after clearing permissions:', finalError);
+                                    usingMicrophoneInput = false;
+                                }
+                            } else {
+                                console.warn('Microphone permission denied:', innerError);
+                                usingMicrophoneInput = false;
+                            }
+                        } else {
+                            console.warn('Failed to get microphone access:', innerError);
+                            usingMicrophoneInput = false;
+                        }
+                    }
+                } else if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+                    // If permission is denied on first attempt, try to clear permission overrides and ask again
+                    if (window.electronAPI && window.electronAPI.clearMicrophonePermission) {
+                        console.log('Microphone permission denied, attempting to clear permission overrides');
+                        try {
+                            await window.electronAPI.clearMicrophonePermission();
+                            // Try one more time after clearing permissions
+                            this.stream = await navigator.mediaDevices.getUserMedia({
+                                audio: audioConstraints
+                            });
+                            lastMicError = null;
+                        } catch (finalError) {
+                            lastMicError = finalError;
+                            console.warn('Failed to get microphone access after clearing permissions:', finalError);
+                            usingMicrophoneInput = false;
+                        }
+                    } else {
+                        console.warn('Microphone permission denied:', error);
                         usingMicrophoneInput = false;
                     }
                 } else {
@@ -141,6 +185,9 @@ export class AudioIOManager {
                 // Store the error message if microphone access was denied, but don't return it yet
                 // This allows us to continue setting up the audio nodes for playback
                 if (!usingMicrophoneInput) {
+                    // Use the same error format as before so app.js can detect it properly.
+                    // The MIC_DENIED_PREFIX shared constant guarantees the prefix stays in
+                    // sync with AudioManager._doReset's startsWith() check.
                     microphoneError = `${MIC_DENIED_PREFIX}. Music file playback mode will still work.`;
                 }
             }
