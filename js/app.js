@@ -814,7 +814,10 @@ class App {
 
         // Display microphone error message if there was one
         if (this.hasAudioError) {
+            // Show a non-blocking warning message to the user, then auto-clear
+            // after 3 s so the warning does not linger indefinitely.
             this.uiManager.setError('error.microphoneAccessDenied', false);
+            setTimeout(() => window.uiManager.clearError(), 3000);
         }
     }
 
