@@ -43,6 +43,7 @@ export class AudioManager {
         this.offlineWorkletNode = null;
         this.isOfflineProcessing = false;
         this._resetInProgress = false;
+        this._hasPendingReset = false;
         this._pendingResetPrefs = null;
         this.isCancelled = false;
         this._skipAudioInitDuringSampleRateChange = false;
@@ -344,18 +345,23 @@ export class AudioManager {
      */
     async reset(audioPreferences = null) {
         if (this._resetInProgress) {
-            // Queue the latest prefs so we retry after current reset finishes
+            // Queue the latest prefs so we retry after current reset finishes.
+            // Use a separate boolean flag so that audioPreferences === null is a
+            // valid queued payload (not confused with "no queued reset").
             console.log('[AudioManager] reset queued — already in progress');
             this._pendingResetPrefs = audioPreferences;
+            this._hasPendingReset = true;
             return '';
         }
         this._resetInProgress = true;
+        this._hasPendingReset = false;
         this._pendingResetPrefs = null;
         try {
             await this._doReset(audioPreferences);
             // Run any reset that was queued while we were busy
-            if (this._pendingResetPrefs !== null) {
+            if (this._hasPendingReset) {
                 const pending = this._pendingResetPrefs;
+                this._hasPendingReset = false;
                 this._pendingResetPrefs = null;
                 console.log('[AudioManager] running queued reset');
                 await this._doReset(pending);

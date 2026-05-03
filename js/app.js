@@ -916,7 +916,6 @@ class App {
             const now = Date.now();
             const elapsed = now - this._lastHdmiReconnectResetTime;
             if (elapsed < 30000) return;  // cooldown — same reconnect oscillation
-            this._lastHdmiReconnectResetTime = now;
 
             // On macOS, the only reliable recovery for HDMI reconnect is a full
             // app relaunch (renderer-process restart).  Page reload, AudioContext
@@ -926,13 +925,21 @@ class App {
             const timeSinceStart = Date.now() - this._appStartTime;
             if (timeSinceStart < 30000) return;
 
-            // Save pipeline state before relaunch so user's work is preserved
+            // Arm cooldown only once we've actually committed to relaunching,
+            // so the startup-grace early-return does not erroneously block
+            // legitimate reconnects within the next 30 seconds.
+            this._lastHdmiReconnectResetTime = now;
+
+            // Save pipeline state before relaunch so user's work is preserved.
+            // getPipelineState lives on audioManager (and uiManager), NOT on pipelineManager.
             try {
-                if (window.electronAPI?.savePipelineStateToFile && window.pipelineManager?.getPipelineState) {
-                    const state = window.pipelineManager.getPipelineState();
+                if (window.electronAPI?.savePipelineStateToFile && this.audioManager?.getPipelineState) {
+                    const state = this.audioManager.getPipelineState();
                     await window.electronAPI.savePipelineStateToFile(state);
                 }
-            } catch (_) { /* fall through to relaunch */ }
+            } catch (err) {
+                console.error('[handleOutputDeviceChange] Failed to save pipeline state before relaunch — user work may be lost:', err);
+            }
 
             if (window.electronAPI?.relaunchApp) {
                 await window.electronAPI.relaunchApp();
