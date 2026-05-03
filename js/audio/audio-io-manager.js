@@ -778,7 +778,6 @@ export class AudioIOManager {
         ]);
     }
 
-
     /**
      * Stop periodic device polling
      */
