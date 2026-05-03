@@ -39,16 +39,6 @@ function registerIpcHandlers() {
     return constants.getIsFirstLaunch();
   });
 
-  // Diagnostic log writer — appends timestamped messages to effetune-debug.log
-  // in the user data directory so HDMI/audio issues can be diagnosed without devtools.
-  const debugLogPath = path.join(app.getPath('userData'), 'effetune-debug.log');
-  ipcMain.handle('write-debug-log', (event, message) => {
-    try {
-      const line = `[${new Date().toISOString()}] ${message}\n`;
-      fs.appendFileSync(debugLogPath, line);
-    } catch (e) { /* ignore */ }
-  });
-  ipcMain.handle('get-debug-log-path', () => debugLogPath);
 
   // Get command line preset file
   ipcMain.handle('get-command-line-preset-file', () => {

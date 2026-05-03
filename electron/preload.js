@@ -169,9 +169,6 @@ contextBridge.exposeInMainWorld(
       return ipcRenderer.invoke('force-check-for-updates');
     },
 
-    // Diagnostic logging to file (for HDMI/audio debugging)
-    writeDebugLog: (message) => ipcRenderer.invoke('write-debug-log', message),
-    getDebugLogPath: () => ipcRenderer.invoke('get-debug-log-path')
   }
 );
 
