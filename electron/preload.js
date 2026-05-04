@@ -89,6 +89,10 @@ contextBridge.exposeInMainWorld(
     // Renderer ping for the main-process watchdog (fire-and-forget).  Sent every
     // 2 s; if main does not see a ping for 15 s it forcibly relaunches the app.
     rendererPing: () => ipcRenderer.send('renderer-ping'),
+
+    // HDMI/audio diagnostic log — fire-and-forget append to userData/effetune-debug.log.
+    writeDebugLog: (message) => ipcRenderer.send('write-debug-log', message),
+    getDebugLogPath: () => ipcRenderer.invoke('get-debug-log-path'),
     
     // Request macOS microphone TCC permission (must be called before getUserMedia)
     requestMicrophoneAccess: () => ipcRenderer.invoke('request-microphone-access'),

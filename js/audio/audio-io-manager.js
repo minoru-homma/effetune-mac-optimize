@@ -7,6 +7,15 @@
 export const MIC_DENIED_PREFIX = 'Audio Error: Microphone access denied';
 
 /**
+ * Local mirror of AudioManager.hdmiDebug (avoiding a circular import).
+ */
+function hdmiDebug(tag, message) {
+    const line = `[hdmi-debug] [${tag}] ${message}`;
+    try { console.log(line); } catch (_) { /* ignore */ }
+    try { window.electronAPI?.writeDebugLog?.(line); } catch (_) { /* ignore */ }
+}
+
+/**
  * AudioIOManager - Manages audio input and output devices
  */
 export class AudioIOManager {
@@ -41,6 +50,7 @@ export class AudioIOManager {
      * @returns {Promise<string>} - Empty string on success, error message on failure
      */
     async initAudioInput() {
+        hdmiDebug('INIT', 'initAudioInput start');
         try {
             // Variable to store microphone error message
             let microphoneError = null;
@@ -77,10 +87,13 @@ export class AudioIOManager {
             // Try to get user media with audio constraints
             let lastMicError = null;
             try {
+                hdmiDebug('INIT', `getUserMedia start (deviceId=${audioConstraints.deviceId ? 'saved' : 'default'})`);
                 this.stream = await this._getUserMediaWithTimeout({
                     audio: audioConstraints
                 });
+                hdmiDebug('INIT', 'getUserMedia done');
             } catch (error) {
+                hdmiDebug('INIT', `getUserMedia failed: ${error.name} ${error.message}`);
                 lastMicError = error;
                 // If failed with saved device, try again with default device
                 if (audioConstraints.deviceId) {
@@ -205,6 +218,7 @@ export class AudioIOManager {
      * @returns {Promise<string>} - Empty string on success, error message on failure
      */
     async initAudioOutput() {
+        hdmiDebug('INIT', 'initAudioOutput start');
         try {
             // For Electron, check if we're using multichannel output
             const preferences = window.electronAPI && window.electronIntegration ? 
@@ -246,15 +260,19 @@ export class AudioIOManager {
                 // the WebAudio path is more reliable for HDMI reconnect recovery.
                 if (preferences?.outputDeviceId &&
                     typeof this.contextManager.audioContext?.setSinkId === 'function') {
+                    hdmiDebug('INIT', `audioContextSinkMode entered deviceId=${preferences.outputDeviceId}`);
                     this.audioContextSinkMode = true;
                     this.destinationNode = null; // use audioContext.destination via connectAudioNodes fallback
                     this.currentOutputDeviceId = preferences.outputDeviceId;
                     try {
+                        hdmiDebug('INIT', 'ctx.setSinkId start');
                         // 3 s timeout instead of the default 10 s — on macOS HDMI flux,
                         // setSinkId can hang and we want to fail fast and continue with
                         // a usable (default-sink) audio context.
                         await this._setSinkIdWithTimeout(this.contextManager.audioContext, preferences.outputDeviceId, 3000);
+                        hdmiDebug('INIT', `ctx.setSinkId done sinkId=${this.contextManager.audioContext.sinkId}`);
                     } catch (e) {
+                        hdmiDebug('INIT', `ctx.setSinkId failed: ${e.message}`);
                         console.warn('[audioCtxSink] setSinkId failed:', e.message);
                     }
                     if (window.electronIntegration?.isElectronEnvironment?.()) {
@@ -644,6 +662,7 @@ export class AudioIOManager {
      * @returns {Promise<boolean>} Success status
      */
     async reapplyOutputDevice(deviceId) {
+        hdmiDebug('REAPPLY', `reapplyOutputDevice start deviceId=${deviceId} mode=${this.audioContextSinkMode ? 'ctx' : 'el'}`);
         // Use a shorter timeout (3 s) for runtime reapply than the 10 s used at init,
         // so that macOS HDMI stuck states fail fast and route to the relaunch fallback
         // instead of leaving the UI unresponsive for 10 s during multi-display flux.
@@ -655,9 +674,11 @@ export class AudioIOManager {
                 // re-re-connect / multi-display flux state — use the timeout wrapper.
                 await this._setSinkIdWithTimeout(ctx, deviceId, RUNTIME_SETSINK_TIMEOUT_MS);
                 this.currentOutputDeviceId = deviceId;
+                hdmiDebug('REAPPLY', `ctx.setSinkId ok newSinkId=${ctx.sinkId}`);
                 console.log('Reapplied output device (ctx):', deviceId);
                 return true;
             } catch (error) {
+                hdmiDebug('REAPPLY', `ctx.setSinkId failed: ${error.message}`);
                 console.warn('Failed to reapply output device (ctx):', error);
                 return false;
             }
@@ -711,8 +732,12 @@ export class AudioIOManager {
         // freeze when HDMI is reconnected within the first 30 s after app launch.
         if (window.electronAPI?.platform === 'darwin' && window.app?._appStartTime) {
             const elapsed = Date.now() - window.app._appStartTime;
-            if (elapsed < 30000) return;
+            if (elapsed < 30000) {
+                hdmiDebug('POLL', `tick skipped (grace, elapsed=${elapsed}ms)`);
+                return;
+            }
         }
+        hdmiDebug('POLL', 'tick start');
 
         let prefs;
         try { prefs = await getPrefs(); } catch (e) {
@@ -753,14 +778,19 @@ export class AudioIOManager {
         const activeDeviceId = foundDevice.deviceId;
         const updatedPrefs = foundByLabel ? { ...prefs, outputDeviceId: activeDeviceId } : prefs;
 
+        hdmiDebug('POLL', `state: foundDevice=${!!foundDevice} foundByLabel=${foundByLabel} wasAbsent=${wasAbsent} currentSinkId=${currentSinkId} activeDeviceId=${activeDeviceId}`);
+
         if (currentSinkId !== activeDeviceId || foundByLabel) {
             // sinkId mismatch or device got a new ID — full reset needed
             if (wasAbsent || foundByLabel) {
                 await new Promise(resolve => setTimeout(resolve, 2000));
             }
+            hdmiDebug('POLL', 'onReset call (sinkId mismatch path)');
             try {
                 await onReset(updatedPrefs);
+                hdmiDebug('POLL', 'onReset returned');
             } catch (e) {
+                hdmiDebug('POLL', `onReset threw: ${e.message ?? e}`);
                 console.error('[_pollTick] onReset failed (sinkId mismatch path):', e.message ?? e);
             }
         } else if (wasAbsent) {
@@ -848,6 +878,7 @@ export class AudioIOManager {
      * Clean up audio input and output
      */
     cleanupAudio() {
+        hdmiDebug('CLEANUP', 'cleanupAudio start');
         // Stop polling before teardown to prevent race conditions
         this.stopDevicePoll();
 
@@ -890,5 +921,6 @@ export class AudioIOManager {
         this.sourceNode = null;
         this.destinationNode = null;
         this.defaultDestinationConnection = null;
+        hdmiDebug('CLEANUP', 'cleanupAudio done');
     }
 }

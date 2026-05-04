@@ -7,6 +7,18 @@ import { EventManager } from './audio/event-manager.js';
 import { getSerializablePluginStateShort, applySerializedState } from './utils/serialization-utils.js';
 
 /**
+ * Diagnostic-log helper for the HDMI recovery path.  Logs to console (visible in
+ * dev tools) and also writes to userData/effetune-debug.log via IPC so the trail
+ * is durable across renderer relaunches and freeze/recovery cycles.  Use a short
+ * tag like 'RESET' / 'CLOSE' so log lines are easy to grep.
+ */
+export function hdmiDebug(tag, message) {
+    const line = `[hdmi-debug] [${tag}] ${message}`;
+    try { console.log(line); } catch (_) { /* ignore */ }
+    try { window.electronAPI?.writeDebugLog?.(line); } catch (_) { /* ignore */ }
+}
+
+/**
  * AudioManager - Main class for audio processing
  * Acts as a facade for the various audio modules
  */
@@ -395,25 +407,36 @@ export class AudioManager {
      * then rebuilds context → worklet → pipeline.
      */
     async _doReset(audioPreferences = null) {
+        hdmiDebug('RESET', `_doReset start prefs=${audioPreferences ? 'yes' : 'null'}`);
+
         // Clean up audio I/O
+        hdmiDebug('RESET', 'cleanupAudio start');
         this.ioManager.cleanupAudio();
-        
+        hdmiDebug('RESET', 'cleanupAudio done');
+
         // Close audio context
+        hdmiDebug('RESET', 'closeAudioContext start');
         await this.contextManager.closeAudioContext();
-        
+        hdmiDebug('RESET', 'closeAudioContext done');
+
         // If audio preferences were provided, save them first
         if (audioPreferences && window.electronAPI && window.electronIntegration) {
+            hdmiDebug('RESET', 'saveAudioPreferences start');
             await window.electronIntegration.saveAudioPreferences(audioPreferences);
+            hdmiDebug('RESET', 'saveAudioPreferences done');
         }
-        
+
         // Skip initialization if we're being called from the sample rate adjustment code
         if (this.contextManager.getSkipAudioInitDuringSampleRateChange()) {
+            hdmiDebug('RESET', 'skip init due to sample-rate change flag');
             this.contextManager.setSkipAudioInitDuringSampleRateChange(false);
             return '';
         }
-        
+
         // Initialize audio (context + input + output)
+        hdmiDebug('RESET', 'initAudio start');
         const audioErr = await this.initAudio();
+        hdmiDebug('RESET', `initAudio done err=${audioErr || 'none'}`);
         if (audioErr) {
             // initAudio() can return either a fatal context/output failure or a
             // non-fatal mic-denied warning (file playback still works).  Only the
@@ -421,23 +444,31 @@ export class AudioManager {
             // constant so this stays in sync if the message is ever rephrased.
             const isMicDenied = audioErr.startsWith(MIC_DENIED_PREFIX);
             if (!isMicDenied) {
+                hdmiDebug('RESET', `_doReset abort: fatal initAudio error: ${audioErr}`);
                 console.error('[AudioManager._doReset] initAudio failed:', audioErr);
                 return '';
             }
             console.warn('[AudioManager._doReset] initAudio non-fatal warning:', audioErr);
         }
-        
+
         // Set up the AudioWorklet that hosts the plugin chain
+        hdmiDebug('RESET', 'initializeAudioWorklet start');
         const workletErr = await this.initializeAudioWorklet();
+        hdmiDebug('RESET', `initializeAudioWorklet done err=${workletErr || 'none'}`);
         if (workletErr) console.error('[AudioManager._doReset] initializeAudioWorklet failed:', workletErr);
-        
+
         // Resume in case the new context started suspended (autoplay policy, HDMI race, etc.)
+        hdmiDebug('RESET', `resumeAudioContext start ctxState=${this.contextManager.audioContext?.state}`);
         await this.contextManager.resumeAudioContext();
-        
+        hdmiDebug('RESET', `resumeAudioContext done ctxState=${this.contextManager.audioContext?.state}`);
+
         // Make sure pipeline is rebuilt with the new audio context
+        hdmiDebug('RESET', 'rebuildPipeline start');
         const pipelineErr = await this.rebuildPipeline(true);
+        hdmiDebug('RESET', `rebuildPipeline done err=${pipelineErr || 'none'}`);
         if (pipelineErr) console.error('[AudioManager._doReset] rebuildPipeline failed:', pipelineErr);
-        
+
+        hdmiDebug('RESET', `_doReset complete ctxState=${this.contextManager.audioContext?.state}`);
         return '';
     }
     

@@ -1,5 +1,5 @@
 import { PluginManager } from './plugin-manager.js';
-import { AudioManager } from './audio-manager.js';
+import { AudioManager, hdmiDebug } from './audio-manager.js';
 import { UIManager } from './ui-manager.js';
 import { electronIntegration } from './electron-integration.js';
 import { applySerializedState } from './utils/serialization-utils.js';
@@ -219,6 +219,7 @@ class App {
 
     async initialize() {
         try {
+            hdmiDebug('LIFECYCLE', `App.initialize start platform=${window.electronAPI?.platform ?? 'web'}`);
             // Show loading spinner
             this.uiManager.showLoadingSpinner();
             
@@ -315,10 +316,10 @@ class App {
             
             // Process command line arguments after all initialization is complete
             this.processCommandLineArguments();
-            
+
             // Set initialized flag to true
             this.initialized = true;
-            
+
         } catch (error) {
             console.error('Initialization error:', error);
             this.uiManager.setError(error.message, true);
@@ -834,12 +835,17 @@ class App {
             return;
         }
 
-        if (this._deviceChangeInProgress) return;
+        if (this._deviceChangeInProgress) {
+            hdmiDebug('HANDLER', 'devicechange skipped (already in progress)');
+            return;
+        }
+        hdmiDebug('HANDLER', 'devicechange enter');
         this._deviceChangeInProgress = true;
         try {
             await this._handleOutputDeviceChangeImpl();
         } finally {
             this._deviceChangeInProgress = false;
+            hdmiDebug('HANDLER', 'devicechange exit');
         }
     }
 
@@ -881,6 +887,11 @@ class App {
             ? ctx?.sinkId
             : ioMgr.audioElement?.sinkId;
         const activeDeviceId = foundDevice?.deviceId ?? prefs.outputDeviceId;
+
+        hdmiDebug('HANDLER',
+            `state: foundDevice=${!!foundDevice} foundByLabel=${foundByLabel} ` +
+            `wasAbsent=${wasAbsent} ctxSinkMode=${ioMgr.audioContextSinkMode} ` +
+            `currentSink=${currentSink} activeDeviceId=${activeDeviceId} ctxState=${ctx?.state}`);
 
         if (typeof currentSink === 'undefined') {
             if (foundDevice) await this.audioManager.reset(null);
@@ -1003,14 +1014,21 @@ class App {
      * No-op outside the gate — caller may safely await without further checks.
      */
     async _doMacosRelaunch() {
+        hdmiDebug('RELAUNCH', '_doMacosRelaunch entered');
         const now = Date.now();
         const elapsed = now - this._lastHdmiReconnectResetTime;
-        if (elapsed < 10000) return;  // cooldown — same reconnect oscillation (10 s, was 30 s)
+        if (elapsed < 10000) {
+            hdmiDebug('RELAUNCH', `cooldown blocked (elapsed=${elapsed}ms)`);
+            return;
+        }
 
         // Skip auto-relaunch for the first 30 s after app start to prevent
         // infinite relaunch loops when HDMI is unstable around launch.
         const timeSinceStart = Date.now() - this._appStartTime;
-        if (timeSinceStart < 30000) return;
+        if (timeSinceStart < 30000) {
+            hdmiDebug('RELAUNCH', `startup-grace blocked (sinceStart=${timeSinceStart}ms)`);
+            return;
+        }
 
         // Arm cooldown only once we've actually committed to relaunching,
         // so the startup-grace early-return does not erroneously block
@@ -1039,14 +1057,18 @@ class App {
             console.error('[_doMacosRelaunch] Failed to save pipeline state before relaunch — user work may be lost:', err);
         }
 
+        hdmiDebug('RELAUNCH', 'calling relaunchApp()');
         try {
             if (window.electronAPI?.relaunchApp) {
                 await window.electronAPI.relaunchApp();
+                hdmiDebug('RELAUNCH', 'relaunchApp() returned (process should be exiting)');
             } else {
+                hdmiDebug('RELAUNCH', 'relaunchApp unavailable, fallback to reload');
                 console.warn('[_doMacosRelaunch] electronAPI.relaunchApp unavailable, falling back to window.location.reload()');
                 window.location.reload();
             }
         } catch (err) {
+            hdmiDebug('RELAUNCH', `relaunchApp threw: ${err.message ?? err}`);
             console.error('[_doMacosRelaunch] relaunchApp failed, falling back to reload:', err);
             window.location.reload();
         }

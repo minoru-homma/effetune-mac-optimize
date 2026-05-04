@@ -1,4 +1,13 @@
 /**
+ * Internal helper to mirror AudioManager.hdmiDebug without circular import.
+ */
+function hdmiDebug(tag, message) {
+    const line = `[hdmi-debug] [${tag}] ${message}`;
+    try { console.log(line); } catch (_) { /* ignore */ }
+    try { window.electronAPI?.writeDebugLog?.(line); } catch (_) { /* ignore */ }
+}
+
+/**
  * AudioContextManager - Manages the Web Audio API context
  */
 export class AudioContextManager {
@@ -24,6 +33,7 @@ export class AudioContextManager {
      * @returns {Promise<string>} - Empty string on success, error message on failure
      */
     async initAudioContext() {
+        hdmiDebug('INIT', 'initAudioContext start');
         try {
             // Check if this is the first launch
             if (window.electronAPI && window.electronAPI.isFirstLaunch) {
@@ -83,14 +93,18 @@ export class AudioContextManager {
                 }
                 
                 // Create audio context with options
+                hdmiDebug('INIT', `new AudioContext options=${JSON.stringify(audioContextOptions)}`);
                 this.audioContext = new AudioContext(audioContextOptions);
+                hdmiDebug('INIT', `new AudioContext created state=${this.audioContext.state} sinkId=${this.audioContext.sinkId ?? 'unknown'}`);
                 console.log('AudioContext created with options:', audioContextOptions);
                 window.audioContext = this.audioContext; // Global reference
 
                 // Detect AudioContext interruption caused by audio device changes on macOS
                 this.audioContext.onstatechange = () => {
                     const state = this.audioContext?.state;
+                    hdmiDebug('STATE', `onstatechange -> ${state}`);
                     if (state === 'suspended') {
+                        hdmiDebug('STATE', 'resume() called from onstatechange');
                         this.audioContext.resume().catch(err =>
                             console.warn('[AudioContext] resume after suspended failed:', err)
                         );
@@ -192,6 +206,7 @@ export class AudioContextManager {
      * @returns {Promise<string>} - Empty string on success, error message on failure
      */
     async loadAudioWorklet() {
+        hdmiDebug('INIT', 'loadAudioWorklet start');
         try {
             if (!this.audioContext) {
                 throw new Error('Audio context not initialized');
@@ -204,6 +219,7 @@ export class AudioContextManager {
             // Check if AudioWorklet is supported
             if (this.audioContext.audioWorklet) {
                 try {
+                    hdmiDebug('INIT', 'addModule start');
                     // addModule can hang on macOS audio-system flux; apply a 5 s timeout
                     // so the recovery path does not stall here.
                     let addModuleTimerId;
@@ -218,6 +234,7 @@ export class AudioContextManager {
                             );
                         })
                     ]);
+                    hdmiDebug('INIT', 'addModule done');
                 } catch (error) {
                     // If module is already registered (reconnect recovery), ignore and continue
                     if (!error.message?.includes('already')) {
@@ -339,6 +356,7 @@ export class AudioContextManager {
         if (this.audioContext) {
             // Detach handler before close to prevent spurious 'closed' state trigger
             this.audioContext.onstatechange = null;
+            hdmiDebug('CLOSE', `audioContext.close() start state=${this.audioContext.state}`);
             // close() can hang indefinitely on macOS when HDMI is in a stuck CoreAudio
             // state (the renderer cannot release the device).  Apply a 5 s timeout and
             // continue regardless so the app does not freeze.  Any leaked resources are
@@ -354,7 +372,9 @@ export class AudioContextManager {
                         );
                     })
                 ]);
+                hdmiDebug('CLOSE', 'audioContext.close() resolved');
             } catch (err) {
+                hdmiDebug('CLOSE', `audioContext.close() failed: ${err.message}`);
                 console.warn('[closeAudioContext] close() failed or timed out:', err.message);
             }
             this.audioContext = null;
@@ -370,6 +390,7 @@ export class AudioContextManager {
      * @returns {Promise<void>}
      */
     async resumeAudioContext() {
+        hdmiDebug('RESUME', `resumeAudioContext start state=${this.audioContext?.state}`);
         if (this.audioContext && this.audioContext.state === 'suspended') {
             // resume() can hang when the AudioContext's sinkId points to an HDMI device
             // that CoreAudio hasn't finished initialising yet.  Use a timeout so that
@@ -381,8 +402,13 @@ export class AudioContextManager {
                 new Promise(resolve => { timerId = setTimeout(resolve, 10000); })
             ]).catch(() => {});
             if (this.audioContext?.state !== 'running') {
+                hdmiDebug('RESUME', `resume race finished but state=${this.audioContext?.state}`);
                 console.warn('[AudioContext] resumeAudioContext: context not running after resume attempt, state:', this.audioContext?.state);
+            } else {
+                hdmiDebug('RESUME', 'resume race finished state=running');
             }
+        } else {
+            hdmiDebug('RESUME', `resumeAudioContext skipped (state=${this.audioContext?.state})`);
         }
     }
     

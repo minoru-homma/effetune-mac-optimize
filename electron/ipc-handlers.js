@@ -39,6 +39,22 @@ function registerIpcHandlers() {
     return constants.getIsFirstLaunch();
   });
 
+  // HDMI/audio debug log — fire-and-forget appendFileSync to userData/effetune-debug.log.
+  // Used to capture the recovery-path execution flow when freezes occur (the renderer
+  // may be unable to expose console output, but the file persists across relaunches).
+  // Synchronous write so the log entry is durable even if the process is killed
+  // immediately after.
+  const debugLogPath = path.join(app.getPath('userData'), 'effetune-debug.log');
+  ipcMain.on('write-debug-log', (event, message) => {
+    try {
+      const line = `[${new Date().toISOString()}] ${message}\n`;
+      fs.appendFileSync(debugLogPath, line);
+    } catch (e) {
+      // Stay silent: logging failures must never break the recovery path.
+    }
+  });
+  ipcMain.handle('get-debug-log-path', () => debugLogPath);
+
   // Get command line preset file
   ipcMain.handle('get-command-line-preset-file', () => {
     return constants.getCommandLinePresetFile();
