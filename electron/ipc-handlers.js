@@ -207,22 +207,22 @@ function registerIpcHandlers() {
           fs.appendFileSync(debugLogPath, line);
         } catch (_) { /* never block the recovery path on diagnostic logging */ }
       }
-
+      
       const userDataPath = fileHandlers.getUserDataPath();
       const prefsPath = path.join(userDataPath, 'audio-preferences.json');
-
+      
       // Ensure the directory exists
       if (!fs.existsSync(userDataPath)) {
         fs.mkdirSync(userDataPath, { recursive: true });
       }
-
+      
       fs.writeFileSync(prefsPath, JSON.stringify(preferences, null, 2));
-
+      
       // Show message that audio settings are saved and the application will reload shortly
       const mainWin = constants.getMainWindow();
       if (mainWin) {
         mainWin.webContents.send('show-message', 'Audio settings saved. The application will reload shortly.');
-
+        
         // Wait for a few seconds before reloading
         setTimeout(() => {
           const mainWin = constants.getMainWindow();

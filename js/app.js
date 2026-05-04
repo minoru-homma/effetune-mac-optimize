@@ -316,10 +316,10 @@ class App {
             
             // Process command line arguments after all initialization is complete
             this.processCommandLineArguments();
-
+            
             // Set initialized flag to true
             this.initialized = true;
-
+            
         } catch (error) {
             console.error('Initialization error:', error);
             this.uiManager.setError(error.message, true);

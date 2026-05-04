@@ -896,7 +896,7 @@ function createSplashScreen() {
         splashWindow.close();
         splashWindow = null;
       }
-
+      
       // Persist the first-launch-done marker so future launches skip this
       // splash + reload workaround.  Best-effort — if the write fails, we
       // simply repeat the splash next time.
@@ -906,10 +906,10 @@ function createSplashScreen() {
       } catch (e) {
         console.warn('Failed to write first-launch-done marker:', e);
       }
-
+      
       // Reload the main window
       mainWindow.reload();
-
+      
       // Check for updates after reload if enabled in config
       setTimeout(() => {
         const cfg = constants.getAppConfig();
@@ -917,7 +917,7 @@ function createSplashScreen() {
           checkForUpdates();
         }
       }, 1000);
-
+      
       // Clean up temporary splash file
       try {
         fs.unlinkSync(splashPath);
@@ -1227,12 +1227,12 @@ app.on('open-file', (event, path) => {
 
 // Register the app as the default handler for effetune:// protocol
 app.setAsDefaultProtocolClient('effetune');
-
+  
 // Main entry point
 app.whenReady().then(() => {
   // Initialize the app
   initializeApp();
-
+  
   // Start the renderer watchdog — it self-arms once the first ping arrives.
   startWatchdog();
 

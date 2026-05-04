@@ -417,26 +417,26 @@ export class AudioManager {
         hdmiDebug('RESET', 'cleanupAudio start');
         this.ioManager.cleanupAudio();
         hdmiDebug('RESET', 'cleanupAudio done');
-
+        
         // Close audio context
         hdmiDebug('RESET', 'closeAudioContext start');
         await this.contextManager.closeAudioContext();
         hdmiDebug('RESET', 'closeAudioContext done');
-
+        
         // If audio preferences were provided, save them first
         if (audioPreferences && window.electronAPI && window.electronIntegration) {
             hdmiDebug('RESET', 'saveAudioPreferences start');
             await window.electronIntegration.saveAudioPreferences(audioPreferences);
             hdmiDebug('RESET', 'saveAudioPreferences done');
         }
-
+        
         // Skip initialization if we're being called from the sample rate adjustment code
         if (this.contextManager.getSkipAudioInitDuringSampleRateChange()) {
             hdmiDebug('RESET', 'skip init due to sample-rate change flag');
             this.contextManager.setSkipAudioInitDuringSampleRateChange(false);
             return '';
         }
-
+        
         // Initialize audio (context + input + output)
         hdmiDebug('RESET', 'initAudio start');
         const audioErr = await this.initAudio();
@@ -454,13 +454,13 @@ export class AudioManager {
             }
             console.warn('[AudioManager._doReset] initAudio non-fatal warning:', audioErr);
         }
-
+        
         // Set up the AudioWorklet that hosts the plugin chain
         hdmiDebug('RESET', 'initializeAudioWorklet start');
         const workletErr = await this.initializeAudioWorklet();
         hdmiDebug('RESET', `initializeAudioWorklet done err=${workletErr || 'none'}`);
         if (workletErr) console.error('[AudioManager._doReset] initializeAudioWorklet failed:', workletErr);
-
+        
         // Resume in case the new context started suspended (autoplay policy, HDMI race, etc.)
         hdmiDebug('RESET', `resumeAudioContext start ctxState=${this.contextManager.audioContext?.state}`);
         await this.contextManager.resumeAudioContext();
