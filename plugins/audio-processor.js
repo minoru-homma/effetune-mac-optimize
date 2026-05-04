@@ -11,6 +11,7 @@ class PluginProcessor extends AudioWorkletProcessor {
         this.currentFrame = 0;
         this.pluginProcessors = new Map();
         this.pluginContexts = new Map();
+        this.wasmModules = new Map(); // pluginType -> WebAssembly.Module
         this.masterBypass = false;
 
         // Audio configuration
@@ -87,6 +88,42 @@ class PluginProcessor extends AudioWorkletProcessor {
                     break;
                 case 'registerProcessor':
                     this.registerPluginProcessor(data.pluginType, data.processor);
+                    break;
+                case 'registerWasmBytes':
+                    {
+                        // Compile the WASM module synchronously on the audio thread.
+                        // `new WebAssembly.Module()` blocks but our binaries are tiny
+                        // (~25 KB) and this happens once per plugin type, well before
+                        // process_block is hit.
+                        let module = null;
+                        let err = '';
+                        try {
+                            if (data.bytes instanceof ArrayBuffer) {
+                                module = new WebAssembly.Module(data.bytes);
+                            } else {
+                                err = 'bytes is not ArrayBuffer (got ' + (typeof data.bytes) + ')';
+                            }
+                        } catch (e) {
+                            err = e && e.message ? e.message : String(e);
+                        }
+                        if (module) {
+                            this.wasmModules.set(data.pluginType, module);
+                            // Retroactively attach to any plugin instance whose context was
+                            // already created before the async WASM compile resolved.
+                            for (const plugin of this.plugins) {
+                                if (plugin.type !== data.pluginType) continue;
+                                const ctx = this.pluginContexts.get(plugin.id);
+                                if (ctx && !ctx.wasmModule) {
+                                    ctx.wasmModule = module;
+                                }
+                            }
+                        } else if (err) {
+                            this.port.postMessage({
+                                type: 'log', level: 'error', tag: data.pluginType,
+                                text: 'worklet WASM compile failed: ' + err
+                            });
+                        }
+                    }
                     break;
                 case 'userActivity':
                     { // Block scope for const time
@@ -420,6 +457,10 @@ class PluginProcessor extends AudioWorkletProcessor {
             let pluginContext = pluginContexts.get(plugin.id);
             if (!pluginContext) {
                 pluginContext = {}; // Initialize empty context
+                const wasmModule = this.wasmModules.get(plugin.type);
+                if (wasmModule) {
+                    pluginContext.wasmModule = wasmModule;
+                }
                 pluginContexts.set(plugin.id, pluginContext);
             }
             // Prepare the context object for the processor call.

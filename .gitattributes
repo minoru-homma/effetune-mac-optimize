@@ -26,3 +26,4 @@
 *.ttf binary
 *.otf binary
 *.eot binary
+*.wasm binary

@@ -151,6 +151,60 @@ class PluginBase {
         }
     }
 
+    // Register WebAssembly module bytes for this plugin type. We send the raw
+    // ArrayBuffer (always structured-clonable) and the worklet compiles it via
+    // synchronous `new WebAssembly.Module(bytes)` on receipt. This is more
+    // reliable than sending a pre-compiled WebAssembly.Module across the
+    // AudioWorklet message port in Chromium.
+    //
+    // The async fetch may resolve before window.workletNode exists (the
+    // AudioWorklet is loaded lazily after the GUI renders), so we retry until
+    // the worklet is up.
+    registerWasmModule(wasmBytes) {
+        // Accept either an ArrayBuffer (preferred) or a precompiled Module
+        // (legacy callers). For Modules we also keep the original around for
+        // offline processing on the main thread.
+        if (wasmBytes instanceof WebAssembly.Module) {
+            this.wasmModule = wasmBytes;
+            // We can't reliably ship a Module across the AudioWorklet boundary,
+            // so callers that already have a Module should not be using this
+            // path. Bail without sending anything.
+            return;
+        }
+        if (!(wasmBytes instanceof ArrayBuffer) && !ArrayBuffer.isView(wasmBytes)) {
+            console.warn('[plugin-base] registerWasmModule: expected ArrayBuffer');
+            return;
+        }
+        const buffer = wasmBytes instanceof ArrayBuffer ? wasmBytes : wasmBytes.buffer;
+        // Pre-compile on the main thread too so executeProcessor() (offline path)
+        // can use the same module without re-compiling.
+        try {
+            this.wasmModule = new WebAssembly.Module(buffer);
+        } catch (e) {
+            console.warn('[plugin-base] WebAssembly.compile failed:', e.message);
+            return;
+        }
+        const send = () => {
+            if (!window.workletNode) return false;
+            // Send a structured-clone copy of the bytes (transfer would detach
+            // the original which we still want for the offline path).
+            window.workletNode.port.postMessage({
+                type: 'registerWasmBytes',
+                pluginType: this.constructor.name,
+                bytes: buffer.slice(0)
+            });
+            return true;
+        };
+        if (send()) return;
+        let attempts = 0;
+        const handle = setInterval(() => {
+            attempts++;
+            if (send() || attempts > 150) {
+                clearInterval(handle);
+            }
+        }, 200);
+    }
+
     // Execute the compiled processor function for offline processing.
     executeProcessor(context, data, parameters, time) {
         if (!this.compiledFunction) {

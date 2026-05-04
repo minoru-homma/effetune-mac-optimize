@@ -43,3 +43,6 @@ Thumbs.db
 .qodo
 .npm-cache/
 .worktrees/
+
+# Rust / Cargo build artefacts (WASM source crates)
+wasm-src/**/target/
