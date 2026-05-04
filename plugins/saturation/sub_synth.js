@@ -14,8 +14,56 @@ class SubSynthPlugin extends PluginBase {
 
     this.registerProcessor(`
       if (!parameters.enabled) return data;
-      
+
       const { sl, dl, slf, sls, shf, shs, dhf, dhs, channelCount, blockSize, sampleRate } = parameters;
+
+      // --- WebAssembly fast path ---
+      if (context.wasmModule && !context.wasmDisabled) {
+        try {
+          let w = context.wasm;
+          if (!w
+              || w.cfgSampleRate !== sampleRate
+              || w.cfgChannelCount !== channelCount
+              || w.cfgBlockSize !== blockSize) {
+            if (w) w.ex.free_state(w.sp);
+            const inst = new WebAssembly.Instance(context.wasmModule);
+            const ex = inst.exports;
+            const sp = ex.init(sampleRate, channelCount, blockSize);
+            w = {
+              ex: ex, memory: ex.memory, sp: sp,
+              cfgSampleRate: sampleRate, cfgChannelCount: channelCount, cfgBlockSize: blockSize,
+              paramFingerprint: ''
+            };
+            context.wasm = w;
+            if (context.port && !context.wasmAnnounced) {
+              context.wasmAnnounced = true;
+              context.port.postMessage({
+                type: 'log', tag: 'SubSynth',
+                text: 'WASM instance active (sr=' + sampleRate + ' ch=' + channelCount + ' bs=' + blockSize + ')'
+              });
+            }
+          }
+          const fp = sl + ',' + dl + ',' + slf + ',' + sls + ',' + shf + ',' + shs + ',' + dhf + ',' + dhs;
+          if (fp !== w.paramFingerprint) {
+            w.ex.set_params(w.sp, sl, dl, slf, sls, shf, shs, dhf, dhs);
+            w.paramFingerprint = fp;
+          }
+          const samples = channelCount * blockSize;
+          new Float32Array(w.memory.buffer, w.ex.io_ptr(w.sp), samples)
+            .set(data.subarray(0, samples));
+          w.ex.process_block(w.sp, blockSize);
+          const ioView = new Float32Array(w.memory.buffer, w.ex.io_ptr(w.sp), samples);
+          data.set(ioView);
+          return data;
+        } catch (err) {
+          context.wasmDisabled = true;
+          context.wasm = null;
+          if (context.port) {
+            context.port.postMessage({ type: 'log', level: 'warn', tag: 'SubSynth',
+              text: 'WASM error, fell back to JS: ' + (err && err.message) });
+          }
+        }
+      }
       const sr = sampleRate;
       const subLevelGain = sl / 100;
       const dryLevelGain = dl / 100;  // New Dry Level gain
@@ -169,6 +217,35 @@ class SubSynthPlugin extends PluginBase {
       
       return data;
     `);
+    this._loadWasmModule();
+  }
+
+  _loadWasmModule() {
+    if (typeof window === 'undefined' || typeof WebAssembly === 'undefined') return;
+    try {
+      const currentPath = window.location.pathname;
+      const basePath = currentPath.substring(0, currentPath.lastIndexOf('/'));
+      const url = `${basePath}/plugins/wasm/sub_synth.wasm`;
+      fetch(url)
+        .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.arrayBuffer(); })
+        .then(buf => {
+          this.registerWasmModule(buf);
+          const msg = 'WASM bytes fetched (' + buf.byteLength + 'B), forwarded to worklet.';
+          console.log('[SubSynth]', msg);
+          if (window.electronAPI && window.electronAPI.logToMain) {
+            window.electronAPI.logToMain('info', 'SubSynth', msg);
+          }
+        })
+        .catch(err => {
+          const msg = 'WASM unavailable, using JS path: ' + err.message;
+          console.warn('[SubSynth]', msg);
+          if (window.electronAPI && window.electronAPI.logToMain) {
+            window.electronAPI.logToMain('warn', 'SubSynth', msg);
+          }
+        });
+    } catch (err) {
+      console.warn('[SubSynth] WASM load skipped:', err.message);
+    }
   }
 
   // Parameter setters with validation
