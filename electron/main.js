@@ -25,12 +25,18 @@ let isAppQuitting = false;
 // the last-resort safety net behind the in-renderer timeouts.
 const WATCHDOG_PING_INTERVAL_MS = 2000;
 const WATCHDOG_THRESHOLD_MS = 15000;
+// If app.exit() repeatedly throws (deterministic invalid-lifecycle state),
+// fall back to a hard process.exit(1) after this many attempts so the
+// watchdog cannot become an infinite log-spam loop.
+const WATCHDOG_MAX_EXIT_ATTEMPTS = 5;
 let lastRendererPing = 0;
 let watchdogIntervalId = null;
 let watchdogArmed = false;
 // Set true once app.relaunch() has been registered, so a subsequent watchdog
 // tick (e.g., after app.exit() throws) does not queue a second relaunch.
 let watchdogRelaunchQueued = false;
+// Counts consecutive failed app.exit() attempts to bound the retry loop.
+let watchdogExitAttempts = 0;
 
 function rendererPingReceived() {
   lastRendererPing = Date.now();
@@ -48,6 +54,10 @@ function startWatchdog() {
     if (elapsed <= WATCHDOG_THRESHOLD_MS) return;
 
     console.error(`[watchdog] Renderer unresponsive for ${elapsed}ms — forcing relaunch`);
+    // Note: a queued relaunch cannot be cancelled if the renderer happens to
+    // recover between app.relaunch() and app.exit() taking effect — the
+    // relaunch will still happen.  This is an accepted trade-off for a
+    // last-resort safety net (Electron has no cancelRelaunch() API).
     try {
       // Step 1: register the relaunch (idempotent only against our own guard
       // — Electron's app.relaunch() queues per-call and we don't want stacks).
@@ -64,10 +74,21 @@ function startWatchdog() {
       watchdogIntervalId = null;
     } catch (e) {
       // relaunch() or exit() threw (rare; usually invalid lifecycle state).
-      // Keep the interval running so the next tick can retry exit().  The
-      // relaunch is already queued from a previous successful call (if any),
-      // so subsequent ticks only re-attempt exit().
-      console.error('[watchdog] relaunch/exit failed, will retry exit() on next tick:', e);
+      watchdogExitAttempts++;
+      console.error(
+        `[watchdog] relaunch/exit failed (attempt ${watchdogExitAttempts}/${WATCHDOG_MAX_EXIT_ATTEMPTS}), will retry on next tick:`,
+        e
+      );
+      if (watchdogExitAttempts >= WATCHDOG_MAX_EXIT_ATTEMPTS) {
+        // Hard fallback: bypass Electron's lifecycle entirely so we don't
+        // spin-loop forever logging.  Pipeline state was already saved before
+        // this watchdog fired (or the renderer was unresponsive — best effort).
+        console.error('[watchdog] exhausted retries — calling process.exit(1)');
+        clearInterval(watchdogIntervalId);
+        watchdogIntervalId = null;
+        process.exit(1);
+      }
+      // Otherwise keep the interval running for the next retry.
     }
   }, WATCHDOG_PING_INTERVAL_MS);
 }
