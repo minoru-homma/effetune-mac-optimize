@@ -29,6 +29,8 @@ class AutoLevelerPlugin extends PluginBase {
 
         this.observer = null;
 
+        this._loadWasmModule();
+
         this.registerProcessor(`
             // Audio Processor
             const BLOCK_SIZE = parameters.blockSize;
@@ -39,6 +41,64 @@ class AutoLevelerPlugin extends PluginBase {
             if (!parameters.enabled) {
                 // Return the input data directly
                 return data;
+            }
+
+            // --- WebAssembly fast path ---
+            if (context.wasmModule && !context.wasmDisabled) {
+              try {
+                let w = context.wasm;
+                if (!w
+                    || w.cfgSampleRate !== SAMPLE_RATE
+                    || w.cfgChannelCount !== CHANNEL_COUNT
+                    || w.cfgBlockSize !== BLOCK_SIZE) {
+                  if (w) w.ex.free_state(w.sp);
+                  const inst = new WebAssembly.Instance(context.wasmModule);
+                  const ex = inst.exports;
+                  const sp = ex.init(SAMPLE_RATE, CHANNEL_COUNT, BLOCK_SIZE);
+                  w = {
+                    ex: ex, memory: ex.memory, sp: sp,
+                    cfgSampleRate: SAMPLE_RATE, cfgChannelCount: CHANNEL_COUNT, cfgBlockSize: BLOCK_SIZE,
+                    paramFingerprint: ''
+                  };
+                  context.wasm = w;
+                  if (context.port && !context.wasmAnnounced) {
+                    context.wasmAnnounced = true;
+                    context.port.postMessage({
+                      type: 'log', tag: 'AutoLeveler',
+                      text: 'WASM instance active (sr=' + SAMPLE_RATE + ' ch=' + CHANNEL_COUNT + ' bs=' + BLOCK_SIZE + ')'
+                    });
+                  }
+                }
+                const fp = parameters.tg + ',' + parameters.tw + ',' + parameters.mg + ','
+                  + parameters.ng + ',' + parameters.at + ',' + parameters.rt + ',' + parameters.gt;
+                if (fp !== w.paramFingerprint) {
+                  w.ex.set_params(w.sp, parameters.tg, parameters.tw, parameters.mg,
+                                  parameters.ng, parameters.at, parameters.rt, parameters.gt);
+                  w.paramFingerprint = fp;
+                }
+                const samples = CHANNEL_COUNT * BLOCK_SIZE;
+                new Float32Array(w.memory.buffer, w.ex.io_ptr(w.sp), samples)
+                  .set(data.subarray(0, samples));
+                w.ex.process_block(w.sp, BLOCK_SIZE);
+                const ioView = new Float32Array(w.memory.buffer, w.ex.io_ptr(w.sp), samples);
+                if (!context.wasmOutBuffer || context.wasmOutBuffer.length !== samples) {
+                  context.wasmOutBuffer = new Float32Array(samples);
+                }
+                context.wasmOutBuffer.set(ioView);
+                context.wasmOutBuffer.measurements = {
+                  inputLufs: w.ex.last_input_lufs(w.sp),
+                  outputLufs: w.ex.last_output_lufs(w.sp),
+                  time: time
+                };
+                return context.wasmOutBuffer;
+              } catch (err) {
+                context.wasmDisabled = true;
+                context.wasm = null;
+                if (context.port) {
+                  context.port.postMessage({ type: 'log', level: 'warn', tag: 'AutoLeveler',
+                    text: 'WASM error, fell back to JS: ' + (err && err.message) });
+                }
+              }
             }
 
             // Initialize or reset context state if needed
@@ -295,6 +355,34 @@ class AutoLevelerPlugin extends PluginBase {
 
             return result;
         `);
+    }
+
+    _loadWasmModule() {
+        if (typeof window === 'undefined' || typeof WebAssembly === 'undefined') return;
+        try {
+            const currentPath = window.location.pathname;
+            const basePath = currentPath.substring(0, currentPath.lastIndexOf('/'));
+            const url = `${basePath}/plugins/wasm/auto_leveler.wasm`;
+            fetch(url)
+                .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.arrayBuffer(); })
+                .then(buf => {
+                    this.registerWasmModule(buf);
+                    const msg = 'WASM bytes fetched (' + buf.byteLength + 'B), forwarded to worklet.';
+                    console.log('[AutoLeveler]', msg);
+                    if (window.electronAPI && window.electronAPI.logToMain) {
+                        window.electronAPI.logToMain('info', 'AutoLeveler', msg);
+                    }
+                })
+                .catch(err => {
+                    const msg = 'WASM unavailable, using JS path: ' + err.message;
+                    console.warn('[AutoLeveler]', msg);
+                    if (window.electronAPI && window.electronAPI.logToMain) {
+                        window.electronAPI.logToMain('warn', 'AutoLeveler', msg);
+                    }
+                });
+        } catch (err) {
+            console.warn('[AutoLeveler] WASM load skipped:', err.message);
+        }
     }
 
     onMessage(message) {
