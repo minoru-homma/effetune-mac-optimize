@@ -44,13 +44,22 @@ function startWatchdog() {
     const elapsed = Date.now() - lastRendererPing;
     if (elapsed > WATCHDOG_THRESHOLD_MS) {
       console.error(`[watchdog] Renderer unresponsive for ${elapsed}ms — forcing relaunch`);
-      clearInterval(watchdogIntervalId);
-      watchdogIntervalId = null;
+      // Order matters: attempt relaunch + exit FIRST, then clear the interval.
+      // If app.relaunch() / app.exit() throw (invalid lifecycle state, etc.),
+      // we want the watchdog to keep monitoring so a subsequent tick can retry.
+      // Clearing the interval before the throw would permanently disarm the
+      // watchdog and leave the user stuck.
       try {
         app.relaunch();
         app.exit(0);
+        // Successful exit(0) does not return; if we reach here, exit was a
+        // no-op for some reason — clear the interval so we do not keep firing
+        // relaunch attempts.
+        clearInterval(watchdogIntervalId);
+        watchdogIntervalId = null;
       } catch (e) {
-        console.error('[watchdog] relaunch failed:', e);
+        console.error('[watchdog] relaunch failed, will retry on next tick:', e);
+        // Do NOT clear the interval — let the next tick try again.
       }
     }
   }, WATCHDOG_PING_INTERVAL_MS);

@@ -1009,8 +1009,9 @@ class App {
     /**
      * macOS-only HDMI reconnect recovery via full app relaunch.
      * Called from both the devicechange handler and the device-poll fallback.
-     * Gated by the 30 s cooldown and the 30 s startup grace so that an unstable
-     * HDMI link around app launch cannot trigger an infinite relaunch loop.
+     * Gated by a 10 s cooldown and a 10 s startup grace (≤ 6 relaunches/min
+     * worst case) so that an unstable HDMI link around app launch cannot
+     * trigger an infinite relaunch loop.
      * No-op outside the gate — caller may safely await without further checks.
      */
     async _doMacosRelaunch() {

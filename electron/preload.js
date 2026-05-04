@@ -1,5 +1,17 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+// Resolve the HDMI-debug-enabled flag once at preload load.  Wrapped in try/catch
+// so that any failure of the sync IPC (e.g., handler not yet registered, channel
+// missing) defaults to disabled instead of throwing and aborting the entire
+// contextBridge.exposeInMainWorld call below — a throw here would leave the
+// renderer with no electronAPI at all.
+let __hdmiDebugEnabled = false;
+try {
+  __hdmiDebugEnabled = !!ipcRenderer.sendSync('get-hdmi-debug-enabled');
+} catch (_) {
+  __hdmiDebugEnabled = false;
+}
+
 // Expose protected methods that allow the renderer process to use
 // the ipcRenderer without exposing the entire object
 contextBridge.exposeInMainWorld(
@@ -96,8 +108,9 @@ contextBridge.exposeInMainWorld(
     // Synchronous flag (read at preload load) indicating whether the
     // userData/.hdmi-debug-enabled marker file is present.  When false, the
     // renderer's hdmiDebug() helpers no-op so production builds carry zero
-    // logging overhead.
-    hdmiDebugEnabled: ipcRenderer.sendSync('get-hdmi-debug-enabled'),
+    // logging overhead.  See the try/catch above — defaults to false on any
+    // sync-IPC failure so contextBridge.exposeInMainWorld never aborts.
+    hdmiDebugEnabled: __hdmiDebugEnabled,
     
     // Request macOS microphone TCC permission (must be called before getUserMedia)
     requestMicrophoneAccess: () => ipcRenderer.invoke('request-microphone-access'),
