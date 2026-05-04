@@ -305,6 +305,15 @@ export class AudioManager {
                             isSleepMode: data.isSleepMode,
                             sampleRate: this.audioContext.sampleRate
                         });
+                    } else if (data.type === 'log') {
+                        const tag = data.tag ? `[${data.tag}]` : '[worklet]';
+                        if (data.level === 'error') console.error(tag, data.text);
+                        else if (data.level === 'warn') console.warn(tag, data.text);
+                        else console.log(tag, data.text);
+                        if (window.electronAPI && window.electronAPI.logToMain) {
+                            window.electronAPI.logToMain(data.level || 'info',
+                                data.tag || 'worklet', data.text);
+                        }
                     }
                 };
             }

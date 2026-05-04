@@ -107,6 +107,16 @@ ipcMain.on('renderer-ping', () => {
   rendererPingReceived();
 });
 
+// Forward renderer-side diagnostic logs to the main-process terminal so users
+// running the packaged app (which has no DevTools menu) can still see them.
+ipcMain.on('renderer-log', (_event, payload) => {
+  const tag = payload && payload.tag ? `[${payload.tag}]` : '[renderer]';
+  const text = payload && payload.text != null ? String(payload.text) : '';
+  if (payload && payload.level === 'error') console.error(tag, text);
+  else if (payload && payload.level === 'warn') console.warn(tag, text);
+  else console.log(tag, text);
+});
+
 // macOS only: tell Chromium to auto-approve getUserMedia() without showing its
 // own permission UI.  The actual hardware access still goes through macOS TCC,
 // so the system-level microphone permission is still respected and the
