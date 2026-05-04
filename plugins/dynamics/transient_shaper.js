@@ -23,10 +23,64 @@ class TransientShaperPlugin extends PluginBase {
 
         this.observer = null;
 
+        this._loadWasmModule();
+
         this.registerProcessor(`
             if (!parameters.enabled) return data;
 
             const { fa, fr, sa, sr, gt, gs, sm, blockSize, channelCount, sampleRate } = parameters;
+
+            // --- WebAssembly fast path ---
+            if (context.wasmModule && !context.wasmDisabled) {
+              try {
+                let w = context.wasm;
+                if (!w
+                    || w.cfgSampleRate !== sampleRate
+                    || w.cfgChannelCount !== channelCount
+                    || w.cfgBlockSize !== blockSize) {
+                  if (w) w.ex.free_state(w.sp);
+                  const inst = new WebAssembly.Instance(context.wasmModule);
+                  const ex = inst.exports;
+                  const sp = ex.init(sampleRate, channelCount, blockSize);
+                  w = {
+                    ex: ex, memory: ex.memory, sp: sp,
+                    cfgSampleRate: sampleRate, cfgChannelCount: channelCount, cfgBlockSize: blockSize,
+                    paramFingerprint: ''
+                  };
+                  context.wasm = w;
+                  if (context.port && !context.wasmAnnounced) {
+                    context.wasmAnnounced = true;
+                    context.port.postMessage({
+                      type: 'log', tag: 'TransientShaper',
+                      text: 'WASM instance active (sr=' + sampleRate + ' ch=' + channelCount + ' bs=' + blockSize + ')'
+                    });
+                  }
+                }
+                const fp = fa + ',' + fr + ',' + sa + ',' + sr + ',' + gt + ',' + gs + ',' + sm;
+                if (fp !== w.paramFingerprint) {
+                  w.ex.set_params(w.sp, fa, fr, sa, sr, gt, gs, sm);
+                  w.paramFingerprint = fp;
+                }
+                const samples = channelCount * blockSize;
+                new Float32Array(w.memory.buffer, w.ex.io_ptr(w.sp), samples)
+                  .set(data.subarray(0, samples));
+                w.ex.process_block(w.sp, blockSize);
+                const ioView = new Float32Array(w.memory.buffer, w.ex.io_ptr(w.sp), samples);
+                data.set(ioView);
+                data.measurements = {
+                  gain: w.ex.last_gain_db(w.sp),
+                  time: time
+                };
+                return data;
+              } catch (err) {
+                context.wasmDisabled = true;
+                context.wasm = null;
+                if (context.port) {
+                  context.port.postMessage({ type: 'log', level: 'warn', tag: 'TransientShaper',
+                    text: 'WASM error, fell back to JS: ' + (err && err.message) });
+                }
+              }
+            }
 
             const LN10_OVER_20 = Math.LN10 / 20;
 
@@ -157,6 +211,34 @@ class TransientShaperPlugin extends PluginBase {
                 this.stopAnimation();
             }
         });
+    }
+
+    _loadWasmModule() {
+        if (typeof window === 'undefined' || typeof WebAssembly === 'undefined') return;
+        try {
+            const currentPath = window.location.pathname;
+            const basePath = currentPath.substring(0, currentPath.lastIndexOf('/'));
+            const url = `${basePath}/plugins/wasm/transient_shaper.wasm`;
+            fetch(url)
+                .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.arrayBuffer(); })
+                .then(buf => {
+                    this.registerWasmModule(buf);
+                    const msg = 'WASM bytes fetched (' + buf.byteLength + 'B), forwarded to worklet.';
+                    console.log('[TransientShaper]', msg);
+                    if (window.electronAPI && window.electronAPI.logToMain) {
+                        window.electronAPI.logToMain('info', 'TransientShaper', msg);
+                    }
+                })
+                .catch(err => {
+                    const msg = 'WASM unavailable, using JS path: ' + err.message;
+                    console.warn('[TransientShaper]', msg);
+                    if (window.electronAPI && window.electronAPI.logToMain) {
+                        window.electronAPI.logToMain('warn', 'TransientShaper', msg);
+                    }
+                });
+        } catch (err) {
+            console.warn('[TransientShaper] WASM load skipped:', err.message);
+        }
     }
 
     startAnimation() {
