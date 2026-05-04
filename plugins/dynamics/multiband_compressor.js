@@ -23,6 +23,43 @@ class MultibandCompressorPlugin extends PluginBase {
 
     // Register the processor code (returned as a string)
     this.registerProcessor(this.getProcessorCode());
+
+    // Load the SIMD-accelerated WebAssembly implementation as a non-blocking enhancement.
+    // The JS processor stays as the source of truth; if WASM compilation/instantiation fails
+    // for any reason (network, browser feature, panic) the plugin transparently falls back
+    // to the JS path that was just registered above.
+    this._loadWasmModule();
+  }
+
+  _loadWasmModule() {
+    if (typeof window === 'undefined' || typeof WebAssembly === 'undefined') return;
+    try {
+      const currentPath = window.location.pathname;
+      const basePath = currentPath.substring(0, currentPath.lastIndexOf('/'));
+      const url = `${basePath}/plugins/wasm/multiband_compressor.wasm`;
+      fetch(url)
+        .then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.arrayBuffer();
+        })
+        .then(buf => {
+          this.registerWasmModule(buf);
+          const msg = 'WASM bytes fetched (' + buf.byteLength + 'B), forwarded to worklet.';
+          console.log('[MultibandCompressor]', msg);
+          if (window.electronAPI && window.electronAPI.logToMain) {
+            window.electronAPI.logToMain('info', 'MultibandCompressor', msg);
+          }
+        })
+        .catch(err => {
+          const msg = 'WASM unavailable, using JS path: ' + err.message;
+          console.warn('[MultibandCompressor]', msg);
+          if (window.electronAPI && window.electronAPI.logToMain) {
+            window.electronAPI.logToMain('warn', 'MultibandCompressor', msg);
+          }
+        });
+    } catch (err) {
+      console.warn('[MultibandCompressor] WASM load skipped:', err.message);
+    }
   }
 
   // Returns the processor code string with optimized block processing
@@ -67,6 +104,101 @@ class MultibandCompressorPlugin extends PluginBase {
           gainReductions: context.gainReductions ? context.gainReductions.slice(0, 5) : new Float32Array(5)
         };
         return result;
+      }
+
+      // --- WebAssembly fast path (SIMD) ---
+      // Activated only when registerWasmModule succeeded for this plugin type.
+      // On any error (instantiation, parameter mismatch) we disable the WASM path on this
+      // context and fall through to the original JavaScript implementation below.
+      if (context.wasmModule && !context.wasmDisabled) {
+        try {
+          let w = context.wasm;
+          if (!w) {
+            const inst = new WebAssembly.Instance(context.wasmModule);
+            const e = inst.exports;
+            const statePtr = e.init(sampleRate, channelCount, blockSize,
+                                    parameters.f1, parameters.f2, parameters.f3, parameters.f4);
+            w = {
+              e: e,
+              memory: e.memory,
+              statePtr: statePtr,
+              cfgSampleRate: sampleRate,
+              cfgChannelCount: channelCount,
+              cfgBlockSize: blockSize,
+              f1: parameters.f1, f2: parameters.f2, f3: parameters.f3, f4: parameters.f4
+            };
+            context.wasm = w;
+            if (context.port) {
+              context.port.postMessage({
+                type: 'log', tag: 'MultibandCompressor',
+                text: 'WASM instance active (sr=' + sampleRate + ' ch=' + channelCount + ' bs=' + blockSize + ')'
+              });
+            }
+          }
+
+          // Reinitialise on sample-rate / channel / block-size change.
+          // We require max_block_size == block_size so that the per-channel stride in the
+          // WASM input/output linear-memory buffers matches blockSize exactly.
+          if (w.cfgSampleRate !== sampleRate ||
+              w.cfgChannelCount !== channelCount ||
+              w.cfgBlockSize !== blockSize) {
+            w.e.free_state(w.statePtr);
+            w.statePtr = w.e.init(sampleRate, channelCount, blockSize,
+                                  parameters.f1, parameters.f2, parameters.f3, parameters.f4);
+            w.cfgSampleRate = sampleRate;
+            w.cfgChannelCount = channelCount;
+            w.cfgBlockSize = blockSize;
+            w.f1 = parameters.f1; w.f2 = parameters.f2;
+            w.f3 = parameters.f3; w.f4 = parameters.f4;
+          }
+
+          // Update crossover frequencies if changed.
+          if (w.f1 !== parameters.f1 || w.f2 !== parameters.f2 ||
+              w.f3 !== parameters.f3 || w.f4 !== parameters.f4) {
+            w.e.set_crossover_freqs(w.statePtr,
+              parameters.f1, parameters.f2, parameters.f3, parameters.f4);
+            w.f1 = parameters.f1; w.f2 = parameters.f2;
+            w.f3 = parameters.f3; w.f4 = parameters.f4;
+          }
+
+          // Update band parameters when changed (cheap to call every block, so always send).
+          for (let b = 0; b < 5; b++) {
+            const bp = parameters.bands[b];
+            w.e.set_band_params(w.statePtr, b, bp.t, bp.r, bp.a, bp.rl, bp.k, bp.g);
+          }
+
+          // Build the input view and copy in BEFORE process_block.
+          const samples = channelCount * blockSize;
+          new Float32Array(w.memory.buffer, w.e.input_ptr(w.statePtr), samples)
+            .set(data.subarray(0, samples));
+
+          w.e.process_block(w.statePtr, blockSize);
+
+          // process_block may have grown WASM memory, detaching prior views.
+          // Re-create output and metering views after the call to be safe.
+          const outputView = new Float32Array(w.memory.buffer, w.e.output_ptr(w.statePtr), samples);
+          const grView = new Float32Array(w.memory.buffer, w.e.gain_reductions_ptr(w.statePtr), 5);
+          result.set(outputView);
+
+          if (!context.gainReductions || context.gainReductions.length !== 5) {
+            context.gainReductions = new Float32Array(5);
+          }
+          context.gainReductions.set(grView);
+
+          result.measurements = {
+            time: parameters.time,
+            gainReductions: context.gainReductions.slice(0, 5)
+          };
+          return result;
+        } catch (err) {
+          // Disable WASM for this context; subsequent blocks use JS fallback.
+          context.wasmDisabled = true;
+          context.wasm = null;
+          if (context.port) {
+            context.port.postMessage({ type: 'log', level: 'warn',
+              text: 'MultibandCompressor WASM error, fell back to JS: ' + (err && err.message) });
+          }
+        }
       }
 
       // --- State Initialization and Management ---
