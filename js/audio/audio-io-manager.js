@@ -8,8 +8,10 @@ export const MIC_DENIED_PREFIX = 'Audio Error: Microphone access denied';
 
 /**
  * Local mirror of AudioManager.hdmiDebug (avoiding a circular import).
+ * No-op unless userData/.hdmi-debug-enabled marker is present.
  */
 function hdmiDebug(tag, message) {
+    if (!window.electronAPI?.hdmiDebugEnabled) return;
     const line = `[hdmi-debug] [${tag}] ${message}`;
     try { console.log(line); } catch (_) { /* ignore */ }
     try { window.electronAPI?.writeDebugLog?.(line); } catch (_) { /* ignore */ }

@@ -93,6 +93,11 @@ contextBridge.exposeInMainWorld(
     // HDMI/audio diagnostic log — fire-and-forget append to userData/effetune-debug.log.
     writeDebugLog: (message) => ipcRenderer.send('write-debug-log', message),
     getDebugLogPath: () => ipcRenderer.invoke('get-debug-log-path'),
+    // Synchronous flag (read at preload load) indicating whether the
+    // userData/.hdmi-debug-enabled marker file is present.  When false, the
+    // renderer's hdmiDebug() helpers no-op so production builds carry zero
+    // logging overhead.
+    hdmiDebugEnabled: ipcRenderer.sendSync('get-hdmi-debug-enabled'),
     
     // Request macOS microphone TCC permission (must be called before getUserMedia)
     requestMicrophoneAccess: () => ipcRenderer.invoke('request-microphone-access'),

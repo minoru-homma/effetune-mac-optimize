@@ -1,7 +1,10 @@
 /**
  * Internal helper to mirror AudioManager.hdmiDebug without circular import.
+ * No-op unless userData/.hdmi-debug-enabled marker is present (the flag is
+ * read at preload time into electronAPI.hdmiDebugEnabled).
  */
 function hdmiDebug(tag, message) {
+    if (!window.electronAPI?.hdmiDebugEnabled) return;
     const line = `[hdmi-debug] [${tag}] ${message}`;
     try { console.log(line); } catch (_) { /* ignore */ }
     try { window.electronAPI?.writeDebugLog?.(line); } catch (_) { /* ignore */ }

@@ -40,12 +40,16 @@ function registerIpcHandlers() {
   });
 
   // HDMI/audio debug log — fire-and-forget appendFileSync to userData/effetune-debug.log.
-  // Used to capture the recovery-path execution flow when freezes occur (the renderer
-  // may be unable to expose console output, but the file persists across relaunches).
-  // Synchronous write so the log entry is durable even if the process is killed
-  // immediately after.
+  // Disabled by default; enabled when the user creates the marker file
+  // userData/.hdmi-debug-enabled.  Synchronous write so the log entry is durable
+  // even if the process is killed immediately after.
   const debugLogPath = path.join(app.getPath('userData'), 'effetune-debug.log');
+  const debugMarkerPath = path.join(app.getPath('userData'), '.hdmi-debug-enabled');
+  function isHdmiDebugEnabled() {
+    try { return fs.existsSync(debugMarkerPath); } catch (_) { return false; }
+  }
   ipcMain.on('write-debug-log', (event, message) => {
+    if (!isHdmiDebugEnabled()) return;
     try {
       const line = `[${new Date().toISOString()}] ${message}\n`;
       fs.appendFileSync(debugLogPath, line);
@@ -54,6 +58,13 @@ function registerIpcHandlers() {
     }
   });
   ipcMain.handle('get-debug-log-path', () => debugLogPath);
+
+  // Synchronous flag read used by preload — tells the renderer whether
+  // hdmiDebug() calls should produce output.  Sync IPC is acceptable here
+  // because it runs once per renderer page load.
+  ipcMain.on('get-hdmi-debug-enabled', (event) => {
+    event.returnValue = isHdmiDebugEnabled();
+  });
 
   // Get command line preset file
   ipcMain.handle('get-command-line-preset-file', () => {
@@ -188,12 +199,14 @@ function registerIpcHandlers() {
       // Diagnostic log: this handler triggers a 3 s mainWindow.reload() — record
       // every invocation + caller stack so we can identify spurious save calls
       // that eat into the startup-grace window after a renderer reload.
-      try {
-        const stack = new Error('save-audio-preferences caller').stack;
-        const line = `[${new Date().toISOString()}] [hdmi-debug] [SAVE-PREFS] called keys=${Object.keys(preferences || {}).join(',')}\n${stack}\n`;
-        const debugLogPath = path.join(app.getPath('userData'), 'effetune-debug.log');
-        fs.appendFileSync(debugLogPath, line);
-      } catch (_) { /* never block the recovery path on diagnostic logging */ }
+      // Gated by the .hdmi-debug-enabled marker.
+      if (isHdmiDebugEnabled()) {
+        try {
+          const stack = new Error('save-audio-preferences caller').stack;
+          const line = `[${new Date().toISOString()}] [hdmi-debug] [SAVE-PREFS] called keys=${Object.keys(preferences || {}).join(',')}\n${stack}\n`;
+          fs.appendFileSync(debugLogPath, line);
+        } catch (_) { /* never block the recovery path on diagnostic logging */ }
+      }
 
       const userDataPath = fileHandlers.getUserDataPath();
       const prefsPath = path.join(userDataPath, 'audio-preferences.json');
@@ -214,10 +227,11 @@ function registerIpcHandlers() {
         setTimeout(() => {
           const mainWin = constants.getMainWindow();
           if (mainWin) {
-            try {
-              const debugLogPath = path.join(app.getPath('userData'), 'effetune-debug.log');
-              fs.appendFileSync(debugLogPath, `[${new Date().toISOString()}] [hdmi-debug] [SAVE-PREFS] mainWin.reload() firing\n`);
-            } catch (_) { /* ignore */ }
+            if (isHdmiDebugEnabled()) {
+              try {
+                fs.appendFileSync(debugLogPath, `[${new Date().toISOString()}] [hdmi-debug] [SAVE-PREFS] mainWin.reload() firing\n`);
+              } catch (_) { /* ignore */ }
+            }
             mainWin.reload();
           }
         }, 3000); // 3 seconds delay

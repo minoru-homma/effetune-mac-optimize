@@ -7,12 +7,16 @@ import { EventManager } from './audio/event-manager.js';
 import { getSerializablePluginStateShort, applySerializedState } from './utils/serialization-utils.js';
 
 /**
- * Diagnostic-log helper for the HDMI recovery path.  Logs to console (visible in
- * dev tools) and also writes to userData/effetune-debug.log via IPC so the trail
- * is durable across renderer relaunches and freeze/recovery cycles.  Use a short
- * tag like 'RESET' / 'CLOSE' so log lines are easy to grep.
+ * Diagnostic-log helper for the HDMI recovery path.  No-op in normal use; only
+ * emits when the user has placed a marker file at userData/.hdmi-debug-enabled
+ * (the flag is read once at preload time and exposed via electronAPI).  When
+ * enabled, logs to console (visible in dev tools) and also writes to
+ * userData/effetune-debug.log via IPC so the trail is durable across renderer
+ * relaunches and freeze/recovery cycles.  Use a short tag like 'RESET' / 'CLOSE'
+ * so log lines are easy to grep.
  */
 export function hdmiDebug(tag, message) {
+    if (!window.electronAPI?.hdmiDebugEnabled) return;
     const line = `[hdmi-debug] [${tag}] ${message}`;
     try { console.log(line); } catch (_) { /* ignore */ }
     try { window.electronAPI?.writeDebugLog?.(line); } catch (_) { /* ignore */ }
