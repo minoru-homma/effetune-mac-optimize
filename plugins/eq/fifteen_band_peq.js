@@ -52,11 +52,72 @@ class FifteenBandPEQPlugin extends PluginBase {
   
   // --- Early Exit ---
   if (!parameters.enabled) return data;
-  
+
   // --- Parameter & Context Caching ---
   const { channelCount, blockSize, sampleRate } = parameters;
+
+  // --- WebAssembly fast path ---
+  if (context.wasmModule && !context.wasmDisabled) {
+    try {
+      let w = context.wasm;
+      if (!w
+          || w.cfgSampleRate !== sampleRate
+          || w.cfgChannelCount !== channelCount
+          || w.cfgBlockSize !== blockSize) {
+        if (w) w.ex.free_state(w.sp);
+        const inst = new WebAssembly.Instance(context.wasmModule);
+        const ex = inst.exports;
+        const sp = ex.init(sampleRate, channelCount, blockSize);
+        w = {
+          ex: ex, memory: ex.memory, sp: sp,
+          cfgSampleRate: sampleRate, cfgChannelCount: channelCount, cfgBlockSize: blockSize,
+          paramFingerprint: ''
+        };
+        context.wasm = w;
+        if (context.port && !context.wasmAnnounced) {
+          context.wasmAnnounced = true;
+          context.port.postMessage({
+            type: 'log', tag: 'FifteenBandPEQ',
+            text: 'WASM instance active (sr=' + sampleRate + ' ch=' + channelCount + ' bs=' + blockSize + ')'
+          });
+        }
+      }
+      const TYPE_MAP = { pk: 0, lp: 1, hp: 2, ls: 3, hs: 4, bp: 5, no: 6, ap: 7 };
+      let fp = '';
+      for (let i = 0; i < 15; i++) {
+        fp += parameters['e' + i] + ',' + parameters['t' + i] + ',' + parameters['f' + i] + ',' + parameters['g' + i] + ',' + parameters['q' + i] + ';';
+      }
+      if (fp !== w.paramFingerprint) {
+        for (let i = 0; i < 15; i++) {
+          const tId = TYPE_MAP[parameters['t' + i]] !== undefined ? TYPE_MAP[parameters['t' + i]] : 0;
+          w.ex.set_band(w.sp, i,
+            parameters['e' + i] ? 1 : 0,
+            tId,
+            parameters['f' + i],
+            parameters['g' + i],
+            parameters['q' + i]);
+        }
+        w.paramFingerprint = fp;
+      }
+      const samples = channelCount * blockSize;
+      new Float32Array(w.memory.buffer, w.ex.io_ptr(w.sp), samples)
+        .set(data.subarray(0, samples));
+      w.ex.process_block(w.sp, blockSize);
+      const ioView = new Float32Array(w.memory.buffer, w.ex.io_ptr(w.sp), samples);
+      data.set(ioView);
+      return data;
+    } catch (err) {
+      context.wasmDisabled = true;
+      context.wasm = null;
+      if (context.port) {
+        context.port.postMessage({ type: 'log', level: 'warn', tag: 'FifteenBandPEQ',
+          text: 'WASM error, fell back to JS: ' + (err && err.message) });
+      }
+    }
+  }
+
   const sampleRateInv = 1.0 / sampleRate;
-  const twoPiTimesSrInv = TWO_PI * sampleRateInv; 
+  const twoPiTimesSrInv = TWO_PI * sampleRateInv;
   
   // --- State Initialization & Management ---
   if (!context.initialized || context.lastChannelCount !== channelCount) {
@@ -235,6 +296,35 @@ class FifteenBandPEQPlugin extends PluginBase {
       this['e' + i] = true;
     }
     this.registerProcessor(FifteenBandPEQPlugin.processorFunction);
+    this._loadWasmModule();
+  }
+
+  _loadWasmModule() {
+    if (typeof window === 'undefined' || typeof WebAssembly === 'undefined') return;
+    try {
+      const currentPath = window.location.pathname;
+      const basePath = currentPath.substring(0, currentPath.lastIndexOf('/'));
+      const url = `${basePath}/plugins/wasm/fifteen_band_peq.wasm`;
+      fetch(url)
+        .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.arrayBuffer(); })
+        .then(buf => {
+          this.registerWasmModule(buf);
+          const msg = 'WASM bytes fetched (' + buf.byteLength + 'B), forwarded to worklet.';
+          console.log('[FifteenBandPEQ]', msg);
+          if (window.electronAPI && window.electronAPI.logToMain) {
+            window.electronAPI.logToMain('info', 'FifteenBandPEQ', msg);
+          }
+        })
+        .catch(err => {
+          const msg = 'WASM unavailable, using JS path: ' + err.message;
+          console.warn('[FifteenBandPEQ]', msg);
+          if (window.electronAPI && window.electronAPI.logToMain) {
+            window.electronAPI.logToMain('warn', 'FifteenBandPEQ', msg);
+          }
+        });
+    } catch (err) {
+      console.warn('[FifteenBandPEQ] WASM load skipped:', err.message);
+    }
   }
 
   setBand(index, freq, gain, Q, type, enabled) {
