@@ -896,10 +896,20 @@ function createSplashScreen() {
         splashWindow.close();
         splashWindow = null;
       }
-      
+
+      // Persist the first-launch-done marker so future launches skip this
+      // splash + reload workaround.  Best-effort — if the write fails, we
+      // simply repeat the splash next time.
+      try {
+        const marker = path.join(app.getPath('userData'), '.first-launch-done');
+        fs.writeFileSync(marker, new Date().toISOString());
+      } catch (e) {
+        console.warn('Failed to write first-launch-done marker:', e);
+      }
+
       // Reload the main window
       mainWindow.reload();
-      
+
       // Check for updates after reload if enabled in config
       setTimeout(() => {
         const cfg = constants.getAppConfig();
@@ -907,7 +917,7 @@ function createSplashScreen() {
           checkForUpdates();
         }
       }, 1000);
-      
+
       // Clean up temporary splash file
       try {
         fs.unlinkSync(splashPath);
@@ -1096,8 +1106,24 @@ function initializeApp() {
     }
   });
   
-  // Create splash screen
-  createSplashScreen();
+  // Show the splash screen + 3-second reload workaround only on the actual
+  // first launch (when no first-launch-done marker exists in userData).
+  // Persisting this avoids paying the 3-second reload (which resets the
+  // renderer's startup-grace clock) on every launch and after every relaunch.
+  const firstLaunchMarker = path.join(app.getPath('userData'), '.first-launch-done');
+  let isActuallyFirstLaunch = false;
+  try {
+    isActuallyFirstLaunch = !fs.existsSync(firstLaunchMarker);
+  } catch (e) {
+    isActuallyFirstLaunch = true; // be safe — show splash if we can't tell
+  }
+
+  if (isActuallyFirstLaunch) {
+    createSplashScreen();
+  } else {
+    // Subsequent launch: skip splash + reload entirely.
+    constants.setIsFirstLaunch(false);
+  }
 }
 
 // Initialize global variables
