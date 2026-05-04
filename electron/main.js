@@ -28,6 +28,9 @@ const WATCHDOG_THRESHOLD_MS = 15000;
 let lastRendererPing = 0;
 let watchdogIntervalId = null;
 let watchdogArmed = false;
+// Set true once app.relaunch() has been registered, so a subsequent watchdog
+// tick (e.g., after app.exit() throws) does not queue a second relaunch.
+let watchdogRelaunchQueued = false;
 
 function rendererPingReceived() {
   lastRendererPing = Date.now();
@@ -42,25 +45,29 @@ function startWatchdog() {
   watchdogIntervalId = setInterval(() => {
     if (!watchdogArmed || isAppQuitting) return;
     const elapsed = Date.now() - lastRendererPing;
-    if (elapsed > WATCHDOG_THRESHOLD_MS) {
-      console.error(`[watchdog] Renderer unresponsive for ${elapsed}ms — forcing relaunch`);
-      // Order matters: attempt relaunch + exit FIRST, then clear the interval.
-      // If app.relaunch() / app.exit() throw (invalid lifecycle state, etc.),
-      // we want the watchdog to keep monitoring so a subsequent tick can retry.
-      // Clearing the interval before the throw would permanently disarm the
-      // watchdog and leave the user stuck.
-      try {
+    if (elapsed <= WATCHDOG_THRESHOLD_MS) return;
+
+    console.error(`[watchdog] Renderer unresponsive for ${elapsed}ms — forcing relaunch`);
+    try {
+      // Step 1: register the relaunch (idempotent only against our own guard
+      // — Electron's app.relaunch() queues per-call and we don't want stacks).
+      if (!watchdogRelaunchQueued) {
         app.relaunch();
-        app.exit(0);
-        // Successful exit(0) does not return; if we reach here, exit was a
-        // no-op for some reason — clear the interval so we do not keep firing
-        // relaunch attempts.
-        clearInterval(watchdogIntervalId);
-        watchdogIntervalId = null;
-      } catch (e) {
-        console.error('[watchdog] relaunch failed, will retry on next tick:', e);
-        // Do NOT clear the interval — let the next tick try again.
+        watchdogRelaunchQueued = true;
       }
+      // Step 2: terminate the current process.  app.exit() returns
+      // synchronously to JS but actual termination happens after the event
+      // loop unwinds, so the line below normally runs.  We clear the interval
+      // here so the watchdog does not fire again before exit takes effect.
+      app.exit(0);
+      clearInterval(watchdogIntervalId);
+      watchdogIntervalId = null;
+    } catch (e) {
+      // relaunch() or exit() threw (rare; usually invalid lifecycle state).
+      // Keep the interval running so the next tick can retry exit().  The
+      // relaunch is already queued from a previous successful call (if any),
+      // so subsequent ticks only re-attempt exit().
+      console.error('[watchdog] relaunch/exit failed, will retry exit() on next tick:', e);
     }
   }, WATCHDOG_PING_INTERVAL_MS);
 }

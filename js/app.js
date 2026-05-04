@@ -825,8 +825,8 @@ class App {
     /**
      * Handle output device change events.
      * Uses a 3-second disconnect debounce to avoid reacting to brief HDMI state
-     * oscillations during re-plug, and a 30-second cooldown to prevent repeated
-     * reconnect resets from the same reconnect event.
+     * oscillations during re-plug, and a 10-second cooldown (in _doMacosRelaunch)
+     * to prevent repeated reconnect resets from the same reconnect event.
      */
     async handleOutputDeviceChange() {
         if (!window.electronIntegration ||
@@ -1036,7 +1036,7 @@ class App {
 
         // Arm cooldown only once we've actually committed to relaunching,
         // so the startup-grace early-return does not erroneously block
-        // legitimate reconnects within the next 30 seconds.
+        // legitimate reconnects within the next 10 seconds.
         this._lastHdmiReconnectResetTime = now;
 
         // Save pipeline state before relaunch so user's work is preserved.

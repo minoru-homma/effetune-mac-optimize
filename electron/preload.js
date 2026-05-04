@@ -8,7 +8,13 @@ const { contextBridge, ipcRenderer } = require('electron');
 let __hdmiDebugEnabled = false;
 try {
   __hdmiDebugEnabled = !!ipcRenderer.sendSync('get-hdmi-debug-enabled');
-} catch (_) {
+} catch (e) {
+  // Visible warning so a future IPC handler refactor that breaks this channel
+  // does not silently disable HDMI diagnostics — the whole point of the flag.
+  console.warn(
+    '[preload] get-hdmi-debug-enabled sync IPC failed; HDMI debug logging disabled:',
+    e?.message || e
+  );
   __hdmiDebugEnabled = false;
 }
 
