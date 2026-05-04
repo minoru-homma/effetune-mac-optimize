@@ -37,6 +37,14 @@ class SpectrumAnalyzerPlugin extends PluginBase {
         // Register processor function
         this.registerProcessor(SpectrumAnalyzerPlugin.processorFunction);
         this.observer = null;
+
+        // Main-thread WASM instance for FFT + magnitude + peak hold.
+        // The processor (worklet) part is just buffering; the heavy work is in
+        // process(message) below, which runs on the main thread when each
+        // half-FFT-sized chunk arrives.
+        this._wasm = null;
+        this._wasmPt = 0;
+        this._loadWasmModule();
     }
 
     static processorFunction = `
@@ -212,9 +220,68 @@ class SpectrumAnalyzerPlugin extends PluginBase {
         // Update sampleRate if it has changed
         if (message.measurements.sampleRate && this.sampleRate !== message.measurements.sampleRate) {
             this.sampleRate = message.measurements.sampleRate;
-            // this.updateParameters(); // Could inform processor if needed, or just for UI
         }
 
+        const currentTime = message.measurements.time;
+        const deltaTime = this.lastProcessTime < currentTime ? currentTime - this.lastProcessTime : 0.02;
+        const decay = 20 * deltaTime;
+
+        // --- WebAssembly fast path -------------------------------------------------
+        // Lazily (re)create the WASM instance for the current FFT size.
+        if (this._wasmModule && this._wasmPt !== this.pt) {
+            try {
+                if (this._wasm) this._wasmModule.exports?.free_state?.(this._wasm.sp);
+            } catch (_) { /* ignore */ }
+            this._wasm = null;
+        }
+        if (this._wasmModule && !this._wasm) {
+            try {
+                const inst = new WebAssembly.Instance(this._wasmModule);
+                const ex = inst.exports;
+                const sp = ex.init(this.pt);
+                this._wasm = { ex, memory: ex.memory, sp };
+                this._wasmPt = this.pt;
+                // Seed peaks with current JS values so the visual is continuous.
+                const peaksView = new Float32Array(ex.memory.buffer, ex.peaks_ptr(sp), halfFft);
+                peaksView.set(this.peaks.subarray(0, halfFft));
+                const msg = 'WASM instance active (fftSize=' + fftSize + ' sr=' + this.sampleRate + ')';
+                console.log('[SpectrumAnalyzer]', msg);
+                if (window.electronAPI && window.electronAPI.logToMain) {
+                    window.electronAPI.logToMain('info', 'SpectrumAnalyzer', msg);
+                }
+            } catch (err) {
+                console.warn('[SpectrumAnalyzer] WASM instance failed:', err.message);
+                this._wasmModule = null; // disable
+            }
+        }
+
+        if (this._wasm) {
+            try {
+                const w = this._wasm;
+                // Refresh views every call (memory.grow detaches old views).
+                new Float32Array(w.memory.buffer, w.ex.input_ptr(w.sp), fftSize)
+                    .set(averageBuffer);
+                w.ex.analyze(w.sp, bufferPosition >>> 0);
+                w.ex.update_peaks(w.sp, decay);
+                // Refresh views post-call to be safe against memory growth.
+                const specView = new Float32Array(w.memory.buffer, w.ex.spectrum_ptr(w.sp), halfFft);
+                const peaksView = new Float32Array(w.memory.buffer, w.ex.peaks_ptr(w.sp), halfFft);
+                this.spectrum.set(specView);
+                if (!this.peaks || this.peaks.length !== halfFft) {
+                    this.peaks = new Float32Array(halfFft);
+                }
+                this.peaks.set(peaksView);
+                this.lastProcessTime = currentTime;
+                return;
+            } catch (err) {
+                console.warn('[SpectrumAnalyzer] WASM error, falling back to JS:', err.message);
+                this._wasm = null;
+                this._wasmModule = null;
+                // fall through to JS path
+            }
+        }
+
+        // --- JS fallback path ----------------------------------------------------
         this.imag.fill(0);
         let pos = bufferPosition % fftSize;
         for (let i = 0; i < fftSize; i++) {
@@ -226,24 +293,11 @@ class SpectrumAnalyzerPlugin extends PluginBase {
 
         this.fft(this.real, this.imag);
 
-        // Calculate magnitude spectrum
         for (let i = 0; i < halfFft; i++) {
             const rawPower = this.real[i] * this.real[i] + this.imag[i] * this.imag[i];
-            
-            let currentCorrection;
-            if (i === 0) { // DC component
-                currentCorrection = this.correctionDC;
-            } else { // AC components
-                currentCorrection = this.correctionAC;
-            }
-            
-            const db = 10 * Math.log10(rawPower + 1e-24) + currentCorrection;
-            this.spectrum[i] = db;
+            const currentCorrection = i === 0 ? this.correctionDC : this.correctionAC;
+            this.spectrum[i] = 10 * Math.log10(rawPower + 1e-24) + currentCorrection;
         }
-
-        const currentTime = message.measurements.time;
-        const deltaTime = this.lastProcessTime < currentTime ? currentTime - this.lastProcessTime : 0.02;
-        const decay = 20 * deltaTime;
 
         if (!this.peaks || this.peaks.length !== halfFft) {
             this.peaks = new Float32Array(halfFft).fill(-145);
@@ -257,9 +311,36 @@ class SpectrumAnalyzerPlugin extends PluginBase {
             const newPeak = this.spectrum[i] > decayedPeak ? this.spectrum[i] : decayedPeak;
             this.peaks[i] = newPeak < -145 ? -145 : newPeak > 0 ? 0 : newPeak;
         }
-        
         this.lastProcessTime = currentTime;
-        return;
+    }
+
+    _loadWasmModule() {
+        if (typeof window === 'undefined' || typeof WebAssembly === 'undefined') return;
+        try {
+            const currentPath = window.location.pathname;
+            const basePath = currentPath.substring(0, currentPath.lastIndexOf('/'));
+            const url = `${basePath}/plugins/wasm/spectrum_analyzer.wasm`;
+            fetch(url)
+                .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.arrayBuffer(); })
+                .then(buf => WebAssembly.compile(buf))
+                .then(mod => {
+                    this._wasmModule = mod;
+                    const msg = 'WASM compiled (FFT + magnitude + peak-hold).';
+                    console.log('[SpectrumAnalyzer]', msg);
+                    if (window.electronAPI && window.electronAPI.logToMain) {
+                        window.electronAPI.logToMain('info', 'SpectrumAnalyzer', msg);
+                    }
+                })
+                .catch(err => {
+                    const msg = 'WASM unavailable, using JS path: ' + err.message;
+                    console.warn('[SpectrumAnalyzer]', msg);
+                    if (window.electronAPI && window.electronAPI.logToMain) {
+                        window.electronAPI.logToMain('warn', 'SpectrumAnalyzer', msg);
+                    }
+                });
+        } catch (err) {
+            console.warn('[SpectrumAnalyzer] WASM load skipped:', err.message);
+        }
     }
 
     createUI() {
