@@ -185,25 +185,39 @@ function registerIpcHandlers() {
   // Save audio device preferences
   ipcMain.handle('save-audio-preferences', async (event, preferences) => {
     try {
+      // Diagnostic log: this handler triggers a 3 s mainWindow.reload() — record
+      // every invocation + caller stack so we can identify spurious save calls
+      // that eat into the startup-grace window after a renderer reload.
+      try {
+        const stack = new Error('save-audio-preferences caller').stack;
+        const line = `[${new Date().toISOString()}] [hdmi-debug] [SAVE-PREFS] called keys=${Object.keys(preferences || {}).join(',')}\n${stack}\n`;
+        const debugLogPath = path.join(app.getPath('userData'), 'effetune-debug.log');
+        fs.appendFileSync(debugLogPath, line);
+      } catch (_) { /* never block the recovery path on diagnostic logging */ }
+
       const userDataPath = fileHandlers.getUserDataPath();
       const prefsPath = path.join(userDataPath, 'audio-preferences.json');
-      
+
       // Ensure the directory exists
       if (!fs.existsSync(userDataPath)) {
         fs.mkdirSync(userDataPath, { recursive: true });
       }
-      
+
       fs.writeFileSync(prefsPath, JSON.stringify(preferences, null, 2));
-      
+
       // Show message that audio settings are saved and the application will reload shortly
       const mainWin = constants.getMainWindow();
       if (mainWin) {
         mainWin.webContents.send('show-message', 'Audio settings saved. The application will reload shortly.');
-        
+
         // Wait for a few seconds before reloading
         setTimeout(() => {
           const mainWin = constants.getMainWindow();
           if (mainWin) {
+            try {
+              const debugLogPath = path.join(app.getPath('userData'), 'effetune-debug.log');
+              fs.appendFileSync(debugLogPath, `[${new Date().toISOString()}] [hdmi-debug] [SAVE-PREFS] mainWin.reload() firing\n`);
+            } catch (_) { /* ignore */ }
             mainWin.reload();
           }
         }, 3000); // 3 seconds delay

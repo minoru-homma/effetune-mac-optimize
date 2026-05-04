@@ -1022,10 +1022,13 @@ class App {
             return;
         }
 
-        // Skip auto-relaunch for the first 30 s after app start to prevent
+        // Skip auto-relaunch for the first 10 s after app start to prevent
         // infinite relaunch loops when HDMI is unstable around launch.
+        // (Was 30 s — shortened because user-driven HDMI tests within the
+        // first 30 s of startup were being silently blocked from recovery,
+        // and the cooldown alone is sufficient to bound loops at 6/min.)
         const timeSinceStart = Date.now() - this._appStartTime;
-        if (timeSinceStart < 30000) {
+        if (timeSinceStart < 10000) {
             hdmiDebug('RELAUNCH', `startup-grace blocked (sinceStart=${timeSinceStart}ms)`);
             return;
         }

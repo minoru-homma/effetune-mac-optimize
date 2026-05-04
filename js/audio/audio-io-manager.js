@@ -725,14 +725,11 @@ export class AudioIOManager {
     }
 
     async _pollTick(getPrefs, onReset) {
-        // On macOS, skip the poll's recovery actions during the 30 s startup grace.
-        // The setSinkId toggle / reset path can hang on stuck CoreAudio HDMI state and
-        // App._doMacosRelaunch is gated by the same grace window — without this gate,
-        // the poll would fire reset/toggle every 4 s and produce an infinite loop /
-        // freeze when HDMI is reconnected within the first 30 s after app launch.
+        // On macOS, skip the poll's recovery actions during the 10 s startup grace
+        // (was 30 s — kept in sync with App._doMacosRelaunch's grace window).
         if (window.electronAPI?.platform === 'darwin' && window.app?._appStartTime) {
             const elapsed = Date.now() - window.app._appStartTime;
-            if (elapsed < 30000) {
+            if (elapsed < 10000) {
                 hdmiDebug('POLL', `tick skipped (grace, elapsed=${elapsed}ms)`);
                 return;
             }
@@ -778,7 +775,37 @@ export class AudioIOManager {
         const activeDeviceId = foundDevice.deviceId;
         const updatedPrefs = foundByLabel ? { ...prefs, outputDeviceId: activeDeviceId } : prefs;
 
-        hdmiDebug('POLL', `state: foundDevice=${!!foundDevice} foundByLabel=${foundByLabel} wasAbsent=${wasAbsent} currentSinkId=${currentSinkId} activeDeviceId=${activeDeviceId}`);
+        hdmiDebug('POLL', `state: foundDevice=${!!foundDevice} foundByLabel=${foundByLabel} wasAbsent=${wasAbsent} currentSinkId=${currentSinkId} activeDeviceId=${activeDeviceId} ctxState=${ctx?.state}`);
+
+        // Stuck non-'running' AudioContext check.
+        // Even when sinkId already matches and the device is present, the underlying
+        // CoreAudio renderer can stay in a 'suspended' state after macOS HDMI flux
+        // (the user perceives this as audio is dead but UI is alive — the original
+        // freeze report).  Recovery: try a quick resume; if it does not bring the
+        // ctx back to 'running', defer to onReset (= _doMacosRelaunch on macOS).
+        if (this.audioContextSinkMode && ctx && ctx.state !== 'running' && ctx.state !== 'closed') {
+            hdmiDebug('POLL', `ctx stuck non-running (state=${ctx.state}) — attempting resume`);
+            try {
+                await Promise.race([
+                    ctx.resume(),
+                    new Promise(resolve => setTimeout(resolve, 3000))
+                ]);
+            } catch (e) {
+                hdmiDebug('POLL', `resume threw: ${e.message ?? e}`);
+            }
+            if (ctx.state !== 'running') {
+                hdmiDebug('POLL', `still ${ctx.state} after resume — calling onReset`);
+                try {
+                    await onReset(updatedPrefs);
+                    hdmiDebug('POLL', 'onReset returned (stuck-state path)');
+                } catch (e) {
+                    hdmiDebug('POLL', `onReset threw (stuck-state path): ${e.message ?? e}`);
+                }
+                return;
+            }
+            hdmiDebug('POLL', 'ctx recovered to running via resume');
+            return;
+        }
 
         if (currentSinkId !== activeDeviceId || foundByLabel) {
             // sinkId mismatch or device got a new ID — full reset needed
