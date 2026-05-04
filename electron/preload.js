@@ -1,9 +1,31 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+// Resolve the HDMI-debug-enabled flag once at preload load.  Wrapped in try/catch
+// so that any failure of the sync IPC (e.g., handler not yet registered, channel
+// missing) defaults to disabled instead of throwing and aborting the entire
+// contextBridge.exposeInMainWorld call below — a throw here would leave the
+// renderer with no electronAPI at all.
+let __hdmiDebugEnabled = false;
+try {
+  __hdmiDebugEnabled = !!ipcRenderer.sendSync('get-hdmi-debug-enabled');
+} catch (e) {
+  // Visible warning so a future IPC handler refactor that breaks this channel
+  // does not silently disable HDMI diagnostics — the whole point of the flag.
+  console.warn(
+    '[preload] get-hdmi-debug-enabled sync IPC failed; HDMI debug logging disabled:',
+    e?.message || e
+  );
+  __hdmiDebugEnabled = false;
+}
+
 // Expose protected methods that allow the renderer process to use
 // the ipcRenderer without exposing the entire object
 contextBridge.exposeInMainWorld(
   'electronAPI', {
+    // Platform identifier ('darwin' | 'win32' | 'linux'). Synchronous so the
+    // renderer can branch on it without an async round-trip.
+    platform: process.platform,
+
     // File system operations
     showSaveDialog: (options) => ipcRenderer.invoke('show-save-dialog', options),
     showOpenDialog: (options) => ipcRenderer.invoke('show-open-dialog', options),
@@ -78,7 +100,27 @@ contextBridge.exposeInMainWorld(
     
     // Reload window
     reloadWindow: () => ipcRenderer.invoke('reload-window'),
+
+    // Full app relaunch (kills renderer process — used for HDMI reconnect recovery)
+    relaunchApp: () => ipcRenderer.invoke('relaunch-app'),
+
+    // Renderer ping for the main-process watchdog (fire-and-forget).  Sent every
+    // 2 s; if main does not see a ping for 15 s it forcibly relaunches the app.
+    rendererPing: () => ipcRenderer.send('renderer-ping'),
+
+    // HDMI/audio diagnostic log — fire-and-forget append to userData/effetune-debug.log.
+    writeDebugLog: (message) => ipcRenderer.send('write-debug-log', message),
+    getDebugLogPath: () => ipcRenderer.invoke('get-debug-log-path'),
+    // Synchronous flag (read at preload load) indicating whether the
+    // userData/.hdmi-debug-enabled marker file is present.  When false, the
+    // renderer's hdmiDebug() helpers no-op so production builds carry zero
+    // logging overhead.  See the try/catch above — defaults to false on any
+    // sync-IPC failure so contextBridge.exposeInMainWorld never aborts.
+    hdmiDebugEnabled: __hdmiDebugEnabled,
     
+    // Request macOS microphone TCC permission (must be called before getUserMedia)
+    requestMicrophoneAccess: () => ipcRenderer.invoke('request-microphone-access'),
+
     // Clear permission overrides for microphone
     clearMicrophonePermission: () => ipcRenderer.invoke('clear-microphone-permission'),
     

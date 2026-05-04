@@ -39,6 +39,33 @@ function registerIpcHandlers() {
     return constants.getIsFirstLaunch();
   });
 
+  // HDMI/audio debug log — fire-and-forget appendFileSync to userData/effetune-debug.log.
+  // Disabled by default; enabled when the user creates the marker file
+  // userData/.hdmi-debug-enabled.  Synchronous write so the log entry is durable
+  // even if the process is killed immediately after.
+  const debugLogPath = path.join(app.getPath('userData'), 'effetune-debug.log');
+  const debugMarkerPath = path.join(app.getPath('userData'), '.hdmi-debug-enabled');
+  function isHdmiDebugEnabled() {
+    try { return fs.existsSync(debugMarkerPath); } catch (_) { return false; }
+  }
+  ipcMain.on('write-debug-log', (event, message) => {
+    if (!isHdmiDebugEnabled()) return;
+    try {
+      const line = `[${new Date().toISOString()}] ${message}\n`;
+      fs.appendFileSync(debugLogPath, line);
+    } catch (e) {
+      // Stay silent: logging failures must never break the recovery path.
+    }
+  });
+  ipcMain.handle('get-debug-log-path', () => debugLogPath);
+
+  // Synchronous flag read used by preload — tells the renderer whether
+  // hdmiDebug() calls should produce output.  Sync IPC is acceptable here
+  // because it runs once per renderer page load.
+  ipcMain.on('get-hdmi-debug-enabled', (event) => {
+    event.returnValue = isHdmiDebugEnabled();
+  });
+
   // Get command line preset file
   ipcMain.handle('get-command-line-preset-file', () => {
     return constants.getCommandLinePresetFile();
@@ -109,6 +136,21 @@ function registerIpcHandlers() {
     return await fileHandlers.readFileAsBuffer(filePath);
   });
 
+  // Request macOS microphone TCC permission from the main process.
+  // Must be called before getUserMedia() in the renderer; otherwise macOS never
+  // shows the privacy dialog and CoreAudio silently denies access.
+  ipcMain.handle('request-microphone-access', async () => {
+    if (process.platform !== 'darwin') return true;
+    try {
+      const status = await systemPreferences.getMediaAccessStatus('microphone');
+      if (status === 'granted') return true;
+      return await systemPreferences.askForMediaAccess('microphone');
+    } catch (error) {
+      console.error('Error requesting microphone access:', error);
+      return false;
+    }
+  });
+
   // Get audio devices
   ipcMain.handle('get-audio-devices', async () => {
     try {
@@ -154,6 +196,18 @@ function registerIpcHandlers() {
   // Save audio device preferences
   ipcMain.handle('save-audio-preferences', async (event, preferences) => {
     try {
+      // Diagnostic log: this handler triggers a 3 s mainWindow.reload() — record
+      // every invocation + caller stack so we can identify spurious save calls
+      // that eat into the startup-grace window after a renderer reload.
+      // Gated by the .hdmi-debug-enabled marker.
+      if (isHdmiDebugEnabled()) {
+        try {
+          const stack = new Error('save-audio-preferences caller').stack;
+          const line = `[${new Date().toISOString()}] [hdmi-debug] [SAVE-PREFS] called keys=${Object.keys(preferences || {}).join(',')}\n${stack}\n`;
+          fs.appendFileSync(debugLogPath, line);
+        } catch (_) { /* never block the recovery path on diagnostic logging */ }
+      }
+      
       const userDataPath = fileHandlers.getUserDataPath();
       const prefsPath = path.join(userDataPath, 'audio-preferences.json');
       
@@ -173,6 +227,11 @@ function registerIpcHandlers() {
         setTimeout(() => {
           const mainWin = constants.getMainWindow();
           if (mainWin) {
+            if (isHdmiDebugEnabled()) {
+              try {
+                fs.appendFileSync(debugLogPath, `[${new Date().toISOString()}] [hdmi-debug] [SAVE-PREFS] mainWin.reload() firing\n`);
+              } catch (_) { /* ignore */ }
+            }
             mainWin.reload();
           }
         }, 3000); // 3 seconds delay
@@ -359,6 +418,19 @@ function registerIpcHandlers() {
       return { success: true };
     }
     return { success: false, error: 'Main window not available' };
+  });
+
+  // Handle full app relaunch (used for HDMI reconnect recovery on macOS,
+  // where renderer-process restart is required to recover audio output).
+  // Re-throw on failure so the renderer can fall back to window.location.reload().
+  ipcMain.handle('relaunch-app', () => {
+    try {
+      app.relaunch();
+      app.exit(0);
+    } catch (error) {
+      console.error('[relaunch-app] Failed to relaunch app:', error);
+      throw error;
+    }
   });
 
   // Handle clear microphone permission request
