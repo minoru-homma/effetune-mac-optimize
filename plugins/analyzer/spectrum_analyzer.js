@@ -45,6 +45,27 @@ class SpectrumAnalyzerPlugin extends PluginBase {
         this._wasm = null;
         this._wasmPt = 0;
         this._loadWasmModule();
+
+        // WebGPU renderer (replaces drawGraph's Canvas 2D path when available).
+        // Loaded asynchronously; until ready (or if it fails), drawGraph()
+        // continues to use the Canvas 2D fallback below.
+        this._gpu = null;
+        this._gpuPending = false;
+        this._gpuDisabled = SpectrumAnalyzerPlugin._readGpuFlag() === false;
+        this._loadGpuRenderer();
+    }
+
+    static _readGpuFlag() {
+        // ?gpu=0 forces fallback for A/B testing; ?gpu=1 (or absent) tries GPU.
+        try {
+            if (typeof window === 'undefined' || !window.location) return null;
+            const v = new URLSearchParams(window.location.search).get('gpu');
+            if (v === '0') return false;
+            if (v === '1') return true;
+            return null;
+        } catch (_) {
+            return null;
+        }
     }
 
     static processorFunction = `
@@ -143,6 +164,10 @@ class SpectrumAnalyzerPlugin extends PluginBase {
         const val = typeof value === 'number' ? value : parseFloat(value);
         this.dr = val < -144 ? -144 : (val > -48 ? -48 : val);
         this.updateParameters();
+        if (this._gpu) {
+            this._gpuConfigureNow();
+            if (typeof this._drawStaticOverlay === 'function') this._drawStaticOverlay();
+        }
     }
 
     setPoints(value) {
@@ -171,6 +196,10 @@ class SpectrumAnalyzerPlugin extends PluginBase {
         
         this.lastProcessTime = performance.now() / 1000;
         this.updateParameters();
+        if (this._gpu) {
+            this._gpuConfigureNow();
+            if (typeof this._drawStaticOverlay === 'function') this._drawStaticOverlay();
+        }
     }
 
     // Reset parameters
@@ -343,6 +372,121 @@ class SpectrumAnalyzerPlugin extends PluginBase {
         }
     }
 
+    _loadGpuRenderer() {
+        if (this._gpuDisabled) return;
+        if (typeof window === 'undefined') return;
+
+        // Already loaded by an earlier plugin instance?
+        if (window.SpectrumAnalyzerGpuRenderer) {
+            this._gpuLoadPromise = Promise.resolve(true);
+            return;
+        }
+        // Already in flight from an earlier instance?
+        if (window.__spectrumGpuLoadPromise) {
+            this._gpuLoadPromise = window.__spectrumGpuLoadPromise;
+            return;
+        }
+        try {
+            const currentPath = window.location.pathname;
+            const basePath = currentPath.substring(0, currentPath.lastIndexOf('/'));
+            const url = `${basePath}/plugins/analyzer/spectrum_analyzer_gpu.js`;
+            const script = document.createElement('script');
+            script.src = url;
+            script.async = true;
+            const promise = new Promise((resolve) => {
+                script.onload = () => {
+                    const ok = !!window.SpectrumAnalyzerGpuRenderer;
+                    if (window.electronAPI && window.electronAPI.logToMain) {
+                        window.electronAPI.logToMain('info', 'SpectrumAnalyzer',
+                            'GPU renderer script loaded (defined=' + ok + ')');
+                    }
+                    resolve(ok);
+                };
+                script.onerror = () => {
+                    const msg = 'GPU renderer script failed to load';
+                    console.warn('[SpectrumAnalyzer]', msg);
+                    if (window.electronAPI && window.electronAPI.logToMain) {
+                        window.electronAPI.logToMain('warn', 'SpectrumAnalyzer', msg);
+                    }
+                    resolve(false);
+                };
+            });
+            window.__spectrumGpuLoadPromise = promise;
+            this._gpuLoadPromise = promise;
+            document.head.appendChild(script);
+        } catch (err) {
+            console.warn('[SpectrumAnalyzer] GPU script inject skipped:', err.message);
+            this._gpuLoadPromise = Promise.resolve(false);
+        }
+    }
+
+    _gpuConfigureNow() {
+        if (!this._gpu) return;
+        const fftSize = 1 << this.pt;
+        const minDisplayFreq = 20;
+        const maxDisplayFreq = 40000;
+        this._gpu.configure({
+            pt: this.pt,
+            sampleRate: this.sampleRate,
+            dr: this.dr,
+            minFreq: minDisplayFreq,
+            maxFreq: maxDisplayFreq,
+            fftSize
+        });
+    }
+
+    // Render axis labels and dB tick text onto the overlay canvas. The grid
+    // lines themselves live on the GPU canvas so they stay crisp during
+    // animation; this overlay only draws static text and is redrawn solely
+    // when sampleRate / dr / pt change.
+    _drawStaticOverlay() {
+        if (!this.labelCanvas) return;
+        const ctx = this.labelCanvas.getContext('2d');
+        if (!ctx) return;
+        const width = this.labelCanvas.width;
+        const height = this.labelCanvas.height;
+        ctx.clearRect(0, 0, width, height);
+
+        const minDisplayFreq = 20;
+        const maxDisplayFreq = 40000;
+        const logMin = Math.log10(minDisplayFreq);
+        const logMax = Math.log10(maxDisplayFreq);
+        const logRange = logMax - logMin;
+        if (logRange <= 0) return;
+
+        ctx.font = '24px Arial';
+        ctx.fillStyle = '#ccc';
+
+        // Frequency labels
+        ctx.textAlign = 'center';
+        const baseGridFreqs = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
+        let freqs = baseGridFreqs.filter(f => f >= minDisplayFreq && f <= maxDisplayFreq);
+        if (!freqs.includes(maxDisplayFreq)) freqs.push(maxDisplayFreq);
+        freqs = [...new Set(freqs)].sort((a, b) => a - b);
+        for (const f of freqs) {
+            const x = width * (Math.log10(f) - logMin) / logRange;
+            if (x < width * 0.02 || x > width * 0.98) continue;
+            const label = f >= 1000 ? `${f / 1000}k` : `${f}`;
+            ctx.fillText(label, x, height - 30);
+        }
+
+        // dB labels
+        ctx.textAlign = 'right';
+        for (let db = 0; db >= this.dr; db -= 12) {
+            const y = height * (db / this.dr);
+            ctx.fillText(`${db}`, 70, y + 9);
+        }
+
+        // Axis titles
+        ctx.fillText('Frequency (Hz)', width / 2, height - 4);
+        ctx.save();
+        ctx.translate(28, height / 2);
+        ctx.rotate(-Math.PI / 2);
+        ctx.textAlign = 'center';
+        ctx.fillText('Level (dB)', 0, 0);
+        ctx.restore();
+    }
+
     createUI() {
         if (this.observer) {
             this.observer.disconnect();
@@ -402,6 +546,89 @@ class SpectrumAnalyzerPlugin extends PluginBase {
         canvas.style.width = '1024px'; canvas.style.height = '480px';
         graphContainer.appendChild(canvas);
         this.canvas = canvas;
+
+        // Wait for the GPU renderer script to load (it was kicked off in the
+        // constructor via _loadGpuRenderer). On macOS it's typically already
+        // loaded by the time the user expands the plugin UI, but we wait
+        // explicitly to handle the race where UI opens before the script
+        // resolves. drawGraph() falls back to Canvas 2D until this resolves.
+        const gpuLogToMain = (level, text) => {
+            if (typeof window !== 'undefined' && window.electronAPI && window.electronAPI.logToMain) {
+                window.electronAPI.logToMain(level, 'SpectrumAnalyzer', text);
+            }
+        };
+        if (this._gpuDisabled) {
+            gpuLogToMain('info', 'WebGPU disabled by ?gpu=0 flag, using Canvas 2D');
+        } else if (typeof window === 'undefined') {
+            // headless / non-browser context — no GPU
+        } else if (this._gpu || this._gpuPending) {
+            // already initialised or in-flight (createUI may be called twice)
+        } else {
+            this._gpuPending = true;
+            const startInit = () => {
+                if (!window.SpectrumAnalyzerGpuRenderer) {
+                    this._gpuPending = false;
+                    gpuLogToMain('warn', 'GPU renderer class not available after script load');
+                    return;
+                }
+                if (!window.SpectrumAnalyzerGpuRenderer.isSupported()) {
+                    this._gpuPending = false;
+                    gpuLogToMain('info', 'navigator.gpu unavailable, using Canvas 2D');
+                    return;
+                }
+                const renderer = new window.SpectrumAnalyzerGpuRenderer(canvas);
+                renderer.init().then((ok) => {
+                    this._gpuPending = false;
+                    if (!ok) {
+                        gpuLogToMain('warn', 'GPU init returned false, using Canvas 2D');
+                        return;
+                    }
+                    this._gpu = renderer;
+                    this._gpuConfigureNow();
+                    // Label overlay (axis text + dB labels) lives on a sibling
+                    // canvas stacked over the GPU one. It is redrawn only when
+                    // the parameters that affect its content change.
+                    // The CSS rule '.plugin-parameter-ui canvas' applies a
+                    // #1a1a1a background to every canvas; we override it here
+                    // so the GPU canvas underneath is visible through the
+                    // label layer.
+                    const label = document.createElement('canvas');
+                    label.width = canvas.width; label.height = canvas.height;
+                    label.style.width = canvas.style.width;
+                    label.style.height = canvas.style.height;
+                    label.style.position = 'absolute';
+                    label.style.left = '0'; label.style.top = '0';
+                    label.style.pointerEvents = 'none';
+                    label.style.backgroundColor = 'transparent';
+                    graphContainer.appendChild(label);
+                    this.labelCanvas = label;
+                    if (typeof this._drawStaticOverlay === 'function') {
+                        this._drawStaticOverlay();
+                    }
+                    const msg = 'WebGPU renderer active';
+                    console.log('[SpectrumAnalyzer]', msg);
+                    gpuLogToMain('info', msg);
+                }).catch((err) => {
+                    this._gpuPending = false;
+                    gpuLogToMain('warn', 'GPU init threw: ' + (err && err.message ? err.message : String(err)));
+                });
+            };
+
+            if (window.SpectrumAnalyzerGpuRenderer) {
+                startInit();
+            } else if (this._gpuLoadPromise) {
+                this._gpuLoadPromise.then((loaded) => {
+                    if (!loaded) {
+                        this._gpuPending = false;
+                        return;
+                    }
+                    startInit();
+                });
+            } else {
+                this._gpuPending = false;
+                gpuLogToMain('warn', 'GPU script load not initiated');
+            }
+        }
 
         const resetButton = document.createElement('button');
         resetButton.className = 'analyzer-reset-button'; resetButton.textContent = 'Reset';
@@ -471,17 +698,46 @@ class SpectrumAnalyzerPlugin extends PluginBase {
         this.boundEventListeners.forEach((handler, element) => {
             // Determine event type if not stored (assuming 'input' or 'click' primarily)
             // A more robust way is to store {event: 'input', handler: handler}
-            element.removeEventListener('input', handler); 
-            element.removeEventListener('click', handler); 
+            element.removeEventListener('input', handler);
+            element.removeEventListener('click', handler);
         });
         this.boundEventListeners.clear();
         this.lastProcessTime = performance.now() / 1000;
+        if (this._gpu) {
+            try { this._gpu.destroy(); } catch (_) { /* ignore */ }
+            this._gpu = null;
+        }
     }
 
     drawGraph() {
         if (!this.canvas) return;
-        
+
+        // GPU path: replaces the entire Canvas 2D draw below. On any error
+        // the renderer is destroyed and we fall through to the 2D path,
+        // which keeps the visualisation alive for the rest of the session.
+        if (this._gpu) {
+            try {
+                this._gpu.render(this.spectrum, this.peaks);
+                return;
+            } catch (err) {
+                console.warn('[SpectrumAnalyzer] GPU render failed, falling back to Canvas 2D:',
+                    err && err.message ? err.message : String(err));
+                if (typeof window !== 'undefined' && window.electronAPI && window.electronAPI.logToMain) {
+                    window.electronAPI.logToMain('warn', 'SpectrumAnalyzer',
+                        'GPU render failed, falling back to Canvas 2D');
+                }
+                try { this._gpu.destroy(); } catch (_) { /* ignore */ }
+                this._gpu = null;
+                // The canvas was claimed by the WebGPU context; getContext('2d')
+                // would now return null. Skip this frame; subsequent frames
+                // hit `if (!ctx) return;` below and stay quiet until the user
+                // reloads. This is the documented device-lost behaviour.
+                return;
+            }
+        }
+
         const ctx = this.canvas.getContext('2d', { alpha: false });
+        if (!ctx) return; // GPU context was previously requested on this canvas.
         const width = this.canvas.width;
         const height = this.canvas.height;
 

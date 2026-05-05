@@ -129,6 +129,14 @@ if (process.platform === 'darwin') {
   app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
 }
 
+// WebGPU (used by the Spectrum Analyzer GPU renderer) is gated to "secure
+// contexts" in Chromium. The renderer is loaded from file:// here, which is
+// not a secure origin, so navigator.gpu.requestAdapter() returns null without
+// this switch. --enable-unsafe-webgpu bypasses the secure-context check; the
+// "unsafe" name refers to the cross-origin policy concern that does not apply
+// to a single-origin desktop app. Must be set before app.ready.
+app.commandLine.appendSwitch('enable-unsafe-webgpu');
+
 // Set up logging to file for debugging (disabled for release)
 function setupFileLogging() {
   // Disabled for release
@@ -1176,8 +1184,13 @@ function initializeApp() {
 // Initialize global variables
 initGlobalVariables();
 
-// Disable hardware acceleration to avoid DXGI errors
-app.disableHardwareAcceleration();
+// Disable hardware acceleration to avoid DXGI errors on Windows.
+// On macOS / Linux this is unnecessary and disables WebGPU (used by the
+// Spectrum Analyzer GPU renderer) because the GPU process falls back to
+// software rendering, where requestAdapter() returns null.
+if (process.platform === 'win32') {
+  app.disableHardwareAcceleration();
+}
 
 // Store command line arguments for processing after splash screen
 constants.setSavedCommandLineMusicFiles([...process.argv]);
