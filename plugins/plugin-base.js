@@ -26,9 +26,22 @@ class PluginBase {
 
         // Flag to track message handler registration
         this._hasMessageHandler = false;
+        // The MessagePort we attached our message listener to.  Tracked so we can
+        // detach from the correct (possibly stale) port and re-attach when the
+        // AudioWorkletNode is recreated by an audio reset — otherwise the plugin
+        // keeps listening on the dead port and its meters/graphs freeze.
+        this._messagePort = null;
 
         // Bind _handleMessage only once for performance
         this._boundHandleMessage = this._handleMessage.bind(this);
+
+        // Heal plugin state whenever the worklet node is recreated (audio
+        // reset / sample-rate change): re-bind the message listener AND
+        // re-register the DSP processor with the brand-new worklet.  Decoupled
+        // via a window event so nested plugins self-heal without the manager
+        // enumerating them.
+        this._boundOnWorkletRecreated = this._onWorkletNodeRecreated.bind(this);
+        window.addEventListener('worklet-node-recreated', this._boundOnWorkletRecreated);
 
         // If workletNode exists, set up the message handler immediately
         if (window.workletNode) {
@@ -53,15 +66,68 @@ class PluginBase {
         if (!this._hasMessageHandler && window.workletNode) {
             window.workletNode.port.addEventListener('message', this._boundHandleMessage);
             this._hasMessageHandler = true;
+            this._messagePort = window.workletNode.port;
         }
     }
-    
+
+    /**
+     * Re-attach the message listener to the current worklet port after the
+     * AudioWorkletNode has been recreated (e.g. by audioManager.reset()).
+     * Plugins that overrode _setupMessageHandler() to a no-op never set
+     * _hasMessageHandler, so they are correctly skipped here.
+     */
+    refreshMessageHandler() {
+        if (!this._hasMessageHandler || !window.workletNode) return;
+        const currentPort = window.workletNode.port;
+        if (this._messagePort === currentPort) return;
+        if (this._messagePort) {
+            try { this._messagePort.removeEventListener('message', this._boundHandleMessage); } catch (_) { /* ignore */ }
+        }
+        currentPort.addEventListener('message', this._boundHandleMessage);
+        this._messagePort = currentPort;
+    }
+
+    /**
+     * Heal this plugin against a freshly created AudioWorkletNode.
+     *
+     * A reset (audioManager.reset / sample-rate change) builds a brand-new
+     * worklet whose processor registry is EMPTY.  rebuildPipeline only resends
+     * the plugin list + parameters (updatePlugins), NOT the compiled DSP code,
+     * so without re-registering here the new worklet runs every plugin as a
+     * pass-through: audio still flows but no processing and no measurements are
+     * produced, freezing every meter/analyzer UI.
+     */
+    _onWorkletNodeRecreated() {
+        this.refreshMessageHandler();
+
+        // Re-register the DSP processor with the new worklet.  Only plugins
+        // that actually registered one have a processorString; skip the rest.
+        if (this.processorString && window.workletNode) {
+            try {
+                window.workletNode.port.postMessage({
+                    type: 'registerProcessor',
+                    pluginType: this.constructor.name,
+                    processor: this.processorString,
+                    process: this.process.toString()
+                });
+            } catch (_) { /* ignore */ }
+        }
+    }
+
     // Clean up resources when plugin is removed
     cleanup() {
-        // Remove message event listener to prevent memory leaks
-        if (this._hasMessageHandler && window.workletNode) {
-            window.workletNode.port.removeEventListener('message', this._boundHandleMessage);
+        // Stop listening for worklet recreation events
+        window.removeEventListener('worklet-node-recreated', this._boundOnWorkletRecreated);
+
+        // Remove message event listener from the port we actually attached to
+        // (window.workletNode may already point at a newer port after a reset).
+        if (this._hasMessageHandler) {
+            const port = this._messagePort || (window.workletNode && window.workletNode.port);
+            if (port) {
+                try { port.removeEventListener('message', this._boundHandleMessage); } catch (_) { /* ignore */ }
+            }
             this._hasMessageHandler = false;
+            this._messagePort = null;
         }
         
         // Clear any pending timeouts

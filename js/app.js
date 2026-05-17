@@ -1084,8 +1084,10 @@ class App {
         if (this._inputDisconnectDebounceTimer) {
             clearTimeout(this._inputDisconnectDebounceTimer);
         }
+        hdmiDebug('IN-HANDLER', 'replug detected — debounce 3s scheduled');
         this._inputDisconnectDebounceTimer = setTimeout(async () => {
             this._inputDisconnectDebounceTimer = null;
+            hdmiDebug('IN-HANDLER', 'debounce fired');
 
             // Re-confirm the device is still present after the oscillation window.
             let devices2;
@@ -1126,6 +1128,7 @@ class App {
                 hdmiDebug('IN-HANDLER', 'light reapply succeeded');
             } else {
                 console.warn('[handleInputDeviceChange] reapplyInputDevice failed, falling back to full reset');
+                hdmiDebug('IN-HANDLER', 'light reapply failed → reset(null)');
                 try {
                     await this.audioManager.reset(null);
                 } catch (err) {
