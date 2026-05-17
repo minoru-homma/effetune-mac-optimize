@@ -435,6 +435,59 @@ class SpectrumAnalyzerPlugin extends PluginBase {
         });
     }
 
+    // Recover from an unexpected WebGPU device loss (GPU process recycle,
+    // sleep/wake, driver update, GC) by re-initialising the renderer on the
+    // same canvas with a fresh adapter/device.  Without this the shared canvas
+    // stays claimed by the dead webgpu context and the Canvas 2D fallback
+    // cannot draw, leaving the analyzer permanently black until app restart.
+    _handleGpuDeviceLost(reason) {
+        const gpuLogToMain = (level, text) => {
+            if (typeof window !== 'undefined' && window.electronAPI && window.electronAPI.logToMain) {
+                window.electronAPI.logToMain(level, 'SpectrumAnalyzer', text);
+            }
+        };
+        if (this._gpuReinitInProgress) return;
+        this._gpuReinitCount = (this._gpuReinitCount || 0) + 1;
+        if (this._gpuReinitCount > 8) {
+            gpuLogToMain('warn', `device lost (${reason}) — giving up WebGPU after ${this._gpuReinitCount - 1} re-init attempts`);
+            return;
+        }
+        this._gpuReinitInProgress = true;
+        // Drop the dead renderer immediately so drawGraph() does not call
+        // render() on it during the async re-init window.
+        const dead = this._gpu;
+        this._gpu = null;
+        try { if (dead) dead.destroy(); } catch (_) { /* ignore */ }
+        gpuLogToMain('warn', `device lost (${reason}) — re-initialising WebGPU (attempt ${this._gpuReinitCount})`);
+        // Small delay: the GPU stack is often briefly unstable right after a
+        // loss (process recycle / wake), so an immediate retry tends to fail.
+        setTimeout(() => {
+            if (this._gpuDisabled || typeof window === 'undefined' ||
+                !this.canvas || !window.SpectrumAnalyzerGpuRenderer ||
+                !window.SpectrumAnalyzerGpuRenderer.isSupported()) {
+                this._gpuReinitInProgress = false;
+                return;
+            }
+            const renderer = new window.SpectrumAnalyzerGpuRenderer(this.canvas);
+            renderer.init().then((ok) => {
+                this._gpuReinitInProgress = false;
+                if (!ok) {
+                    gpuLogToMain('warn', 'WebGPU re-init returned false');
+                    return;
+                }
+                this._gpu = renderer;
+                renderer.onDeviceLost = (r) => this._handleGpuDeviceLost(r);
+                this._gpuConfigureNow();
+                if (typeof this._drawStaticOverlay === 'function') this._drawStaticOverlay();
+                try { this.drawGraph(); } catch (_) { /* ignore */ }
+                gpuLogToMain('info', 'WebGPU renderer recovered after device loss');
+            }).catch((err) => {
+                this._gpuReinitInProgress = false;
+                gpuLogToMain('warn', 'WebGPU re-init threw: ' + (err && err.message ? err.message : String(err)));
+            });
+        }, 400);
+    }
+
     // Render axis labels and dB tick text onto the overlay canvas. The grid
     // lines themselves live on the GPU canvas so they stay crisp during
     // animation; this overlay only draws static text and is redrawn solely
@@ -584,6 +637,7 @@ class SpectrumAnalyzerPlugin extends PluginBase {
                         return;
                     }
                     this._gpu = renderer;
+                    renderer.onDeviceLost = (reason) => this._handleGpuDeviceLost(reason);
                     this._gpuConfigureNow();
                     // Label overlay (axis text + dB labels) lives on a sibling
                     // canvas stacked over the GPU one. It is redrawn only when

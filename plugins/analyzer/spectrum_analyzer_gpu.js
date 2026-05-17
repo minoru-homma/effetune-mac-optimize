@@ -229,11 +229,17 @@ class SpectrumAnalyzerGpuRenderer {
 
     constructor(canvas) {
         this.canvas = canvas;
+        this.adapter = null; // retained so the device is not GC-lost ("destroyed")
         this.device = null;
         this.context = null;
         this.format = null;
         this._destroyed = false;
         this._configured = false;
+        // Optional callback invoked once when the GPUDevice is lost
+        // unexpectedly (GPU process recycle, sleep/wake, driver update, GC).
+        // The owner (plugin) uses it to re-initialise WebGPU rather than
+        // permanently dropping to a (poisoned) Canvas 2D fallback.
+        this.onDeviceLost = null;
 
         // Per-(pt, width) resources
         this._halfFft = 0;
@@ -319,12 +325,25 @@ class SpectrumAnalyzerGpuRenderer {
                 this._logWarn('init step 2 FAILED: requestDevice returned null');
                 return false;
             }
+            // Retain the adapter for the device's lifetime.  Without a strong
+            // reference the adapter (and with it the device) is garbage
+            // collected, surfacing as an unexpected `device lost: destroyed`
+            // a few seconds after init even though no code called destroy().
+            this.adapter = adapter;
             this.device = device;
 
             device.lost.then((info) => {
                 if (this._destroyed) return;
-                this._logWarn('device lost: ' + (info && info.reason ? info.reason : 'unknown'));
+                const reason = info && info.reason ? info.reason : 'unknown';
+                this._logWarn('device lost: ' + reason);
                 this.device = null;
+                // Notify the owner so it can re-initialise WebGPU.  Without
+                // recovery the shared canvas stays claimed by the dead webgpu
+                // context and Canvas 2D fallback cannot draw → permanent black.
+                const cb = this.onDeviceLost;
+                if (typeof cb === 'function') {
+                    try { cb(reason); } catch (_) { /* ignore */ }
+                }
             });
 
             this._logInfo('init step 3: getContext(webgpu)');

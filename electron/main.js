@@ -112,9 +112,20 @@ ipcMain.on('renderer-ping', () => {
 ipcMain.on('renderer-log', (_event, payload) => {
   const tag = payload && payload.tag ? `[${payload.tag}]` : '[renderer]';
   const text = payload && payload.text != null ? String(payload.text) : '';
-  if (payload && payload.level === 'error') console.error(tag, text);
-  else if (payload && payload.level === 'warn') console.warn(tag, text);
+  const level = payload && payload.level ? payload.level : 'log';
+  if (level === 'error') console.error(tag, text);
+  else if (level === 'warn') console.warn(tag, text);
   else console.log(tag, text);
+  // Also tee into effetune-debug.log when the .hdmi-debug-enabled marker is
+  // present, so users on the packaged build (no terminal/DevTools) can capture
+  // renderer diagnostics via the same file workflow as hdmiDebug().
+  try {
+    const markerPath = path.join(app.getPath('userData'), '.hdmi-debug-enabled');
+    if (fs.existsSync(markerPath)) {
+      const logPath = path.join(app.getPath('userData'), 'effetune-debug.log');
+      fs.appendFileSync(logPath, `[${new Date().toISOString()}] [renderer-log] ${level} ${tag} ${text}\n`);
+    }
+  } catch (_) { /* logging must never break the app */ }
 });
 
 // macOS only: tell Chromium to auto-approve getUserMedia() without showing its
@@ -1184,13 +1195,14 @@ function initializeApp() {
 // Initialize global variables
 initGlobalVariables();
 
-// Disable hardware acceleration to avoid DXGI errors on Windows.
-// On macOS / Linux this is unnecessary and disables WebGPU (used by the
-// Spectrum Analyzer GPU renderer) because the GPU process falls back to
-// software rendering, where requestAdapter() returns null.
-if (process.platform === 'win32') {
-  app.disableHardwareAcceleration();
-}
+// Hardware acceleration is kept ENABLED on all platforms.
+// Previously it was disabled on Windows to avoid DXGI errors, but that forced
+// the GPU process into software rendering, so the Spectrum Analyzer's WebGPU
+// renderer only ever got Chromium's SwiftShader fallback adapter
+// (adapter.info.vendor === 'google').  That software device is recycled by the
+// GPU process roughly once per second (device lost: "destroyed"), leaving the
+// analyzer permanently black.  Keeping hardware acceleration on exposes the
+// real GPU adapter so WebGPU stays alive.
 
 // Store command line arguments for processing after splash screen
 constants.setSavedCommandLineMusicFiles([...process.argv]);
