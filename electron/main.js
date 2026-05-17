@@ -107,6 +107,36 @@ ipcMain.on('renderer-ping', () => {
   rendererPingReceived();
 });
 
+// Forward renderer-side diagnostic logs to the main-process terminal so users
+// running the packaged app (which has no DevTools menu) can still see them.
+ipcMain.on('renderer-log', (_event, payload) => {
+  const tag = payload && payload.tag ? `[${payload.tag}]` : '[renderer]';
+  const text = payload && payload.text != null ? String(payload.text) : '';
+  const level = payload && payload.level ? payload.level : 'log';
+  if (level === 'error') console.error(tag, text);
+  else if (level === 'warn') console.warn(tag, text);
+  else console.log(tag, text);
+  // Also tee into effetune-debug.log when the .hdmi-debug-enabled marker is
+  // present, so users on the packaged build (no terminal/DevTools) can capture
+  // renderer diagnostics via the same file workflow as hdmiDebug().
+  try {
+    const markerPath = path.join(app.getPath('userData'), '.hdmi-debug-enabled');
+    if (fs.existsSync(markerPath)) {
+      const logPath = path.join(app.getPath('userData'), 'effetune-debug.log');
+      // This tee runs for every renderer-log line; bound growth by rotating
+      // once it passes ~5 MB (keep a single .1 backup) so a long diagnostic
+      // session cannot fill the user's disk.
+      try {
+        const st = fs.statSync(logPath);
+        if (st.size > 5 * 1024 * 1024) {
+          try { fs.renameSync(logPath, logPath + '.1'); } catch (_) { /* best effort */ }
+        }
+      } catch (_) { /* file may not exist yet */ }
+      fs.appendFileSync(logPath, `[${new Date().toISOString()}] [renderer-log] ${level} ${tag} ${text}\n`);
+    }
+  } catch (_) { /* logging must never break the app */ }
+});
+
 // macOS only: tell Chromium to auto-approve getUserMedia() without showing its
 // own permission UI.  The actual hardware access still goes through macOS TCC,
 // so the system-level microphone permission is still respected and the
@@ -118,6 +148,14 @@ ipcMain.on('renderer-ping', () => {
 if (process.platform === 'darwin') {
   app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
 }
+
+// WebGPU (used by the Spectrum Analyzer GPU renderer) is gated to "secure
+// contexts" in Chromium. The renderer is loaded from file:// here, which is
+// not a secure origin, so navigator.gpu.requestAdapter() returns null without
+// this switch. --enable-unsafe-webgpu bypasses the secure-context check; the
+// "unsafe" name refers to the cross-origin policy concern that does not apply
+// to a single-origin desktop app. Must be set before app.ready.
+app.commandLine.appendSwitch('enable-unsafe-webgpu');
 
 // Set up logging to file for debugging (disabled for release)
 function setupFileLogging() {
@@ -1166,8 +1204,14 @@ function initializeApp() {
 // Initialize global variables
 initGlobalVariables();
 
-// Disable hardware acceleration to avoid DXGI errors
-app.disableHardwareAcceleration();
+// Hardware acceleration is kept ENABLED on all platforms.
+// Previously it was disabled on Windows to avoid DXGI errors, but that forced
+// the GPU process into software rendering, so the Spectrum Analyzer's WebGPU
+// renderer only ever got Chromium's SwiftShader fallback adapter
+// (adapter.info.vendor === 'google').  That software device is recycled by the
+// GPU process roughly once per second (device lost: "destroyed"), leaving the
+// analyzer permanently black.  Keeping hardware acceleration on exposes the
+// real GPU adapter so WebGPU stays alive.
 
 // Store command line arguments for processing after splash screen
 constants.setSavedCommandLineMusicFiles([...process.argv]);

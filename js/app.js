@@ -212,6 +212,16 @@ class App {
         // to prevent infinite relaunch loops when HDMI is unstable at startup
         this._appStartTime = Date.now();
 
+        // --- USB microphone (input device) reconnect recovery ---
+        // Track whether the preferred input device was absent on last devicechange scan
+        this._inputDeviceWasAbsent = false;
+        // Debounce timer for input replug: avoids reacting to device oscillation
+        this._inputDisconnectDebounceTimer = null;
+        // Guard against concurrent handleInputDeviceChange executions
+        this._inputDeviceChangeInProgress = false;
+        // Input reconnect throttling: timestamp of last recovery (0 = never)
+        this._lastInputRecoveryTime = 0;
+
         // Make managers globally accessible for preset functionality
         window.pluginManager = this.pluginManager;
         window.pipelineManager = this.uiManager.pipelineManager;
@@ -762,7 +772,16 @@ class App {
         // Handle audio device changes (e.g., USB device reconnected)
         if (navigator.mediaDevices && typeof navigator.mediaDevices.addEventListener === 'function') {
             navigator.mediaDevices.addEventListener('devicechange', () => {
-                this.handleOutputDeviceChange();
+                // Run input recovery AFTER output recovery, never concurrently.
+                // A single event from a combined USB audio interface (input +
+                // output) would otherwise fire both handlers in parallel; with
+                // separate in-progress guards they could each reach
+                // audioManager.reset() and queue two back-to-back full
+                // teardown/rebuild cycles (extended dropout).
+                Promise.resolve()
+                    .then(() => this.handleOutputDeviceChange())
+                    .catch(() => { /* handled inside */ })
+                    .finally(() => this.handleInputDeviceChange());
             });
         }
     }
@@ -894,7 +913,28 @@ class App {
             `currentSink=${currentSink} activeDeviceId=${activeDeviceId} ctxState=${ctx?.state}`);
 
         if (typeof currentSink === 'undefined') {
-            if (foundDevice) await this.audioManager.reset(null);
+            // Direct-output mode (multi-channel / low-latency stereo): no sinkId
+            // object to reapply, so recovery needs a full rebuild / relaunch.
+            // Trigger it ONLY on a genuine output reconnect (absent→present) or
+            // an ID change (label match) — NOT on every unrelated devicechange
+            // (e.g. a USB mic plug), which previously forced a spurious full
+            // rebuild.
+            if (foundDevice && (wasAbsent || foundByLabel)) {
+                if (window.electronAPI?.platform === 'darwin') {
+                    // macOS HDMI: reset(null) cannot recover stuck CoreAudio and
+                    // tends to hang — defer to the relaunch handler (cooldown +
+                    // startup-grace gated, saves pipeline state internally, no-op
+                    // outside the gate).  Consistent with the sink-mode macOS path.
+                    await this._doMacosRelaunch();
+                } else {
+                    await this._savePipelineStateBeforeRisk();
+                    try {
+                        await this.audioManager.reset(null);
+                    } catch (err) {
+                        console.error('[handleOutputDeviceChange] direct-mode reconnect reset failed:', err);
+                    }
+                }
+            }
             return;
         }
 
@@ -913,6 +953,10 @@ class App {
                     (d.deviceId === prefs.outputDeviceId ||
                      (prefs.outputDeviceLabel && d.label === prefs.outputDeviceLabel)));
                 if (!stillAbsent) return;
+                if (this.audioManager._resetInProgress) {
+                    hdmiDebug('disconnectDebounce', 'reset already in progress — skip');
+                    return;
+                }
                 // Confirmed long disconnect: reset to fallback.
                 // Save pipeline state first so a watchdog-triggered force-relaunch
                 // (if reset() somehow hangs despite our timeouts) still preserves
@@ -980,6 +1024,185 @@ class App {
                 }
             }
         }
+    }
+
+    /**
+     * Handle input (microphone) device change events — USB mic unplug/replug
+     * recovery.  Mirrors the output handler: detect the absent→present transition,
+     * debounce against replug oscillation, then attempt a light input-only
+     * re-acquisition (reapplyInputDevice) that keeps output uninterrupted, with a
+     * full audioManager.reset(null) as the heavyweight fallback.
+     */
+    async handleInputDeviceChange() {
+        if (!window.electronIntegration ||
+            !window.electronIntegration.isElectronEnvironment ||
+            !window.electronIntegration.isElectronEnvironment()) {
+            return;
+        }
+
+        if (this._inputDeviceChangeInProgress) {
+            hdmiDebug('IN-HANDLER', 'devicechange skipped (already in progress)');
+            return;
+        }
+        hdmiDebug('IN-HANDLER', 'devicechange enter');
+        this._inputDeviceChangeInProgress = true;
+        try {
+            await this._handleInputDeviceChangeImpl();
+        } finally {
+            this._inputDeviceChangeInProgress = false;
+            hdmiDebug('IN-HANDLER', 'devicechange exit');
+        }
+    }
+
+    async _handleInputDeviceChangeImpl() {
+        let prefs;
+        try {
+            prefs = await window.electronIntegration.loadAudioPreferences();
+        } catch (err) {
+            console.warn('[_handleInputDeviceChangeImpl] Failed to load audio preferences:', err);
+            return;
+        }
+        if (!prefs) return;
+
+        let devices;
+        try {
+            devices = await navigator.mediaDevices.enumerateDevices();
+        } catch (err) {
+            console.warn('Failed to enumerate devices on input devicechange:', err);
+            return;
+        }
+
+        const inputs = devices.filter(d => d.kind === 'audioinput');
+
+        // Resolve the target device + presence.
+        //  - Saved device: exact id, fall back to label match (id may change on replug).
+        //  - No saved device (default mic): presence proxy = any input that exposes a
+        //    label (a working mic has a non-empty label once permission is granted).
+        let foundByLabel = false;
+        let present;
+        let preferredDeviceId;
+        if (prefs.inputDeviceId) {
+            let found = inputs.find(d => d.deviceId === prefs.inputDeviceId);
+            if (!found && prefs.inputDeviceLabel) {
+                found = inputs.find(d => d.label === prefs.inputDeviceLabel);
+                foundByLabel = !!found;
+            }
+            present = !!found;
+            preferredDeviceId = found?.deviceId ?? prefs.inputDeviceId;
+        } else {
+            present = inputs.some(d => d.label);
+            preferredDeviceId = null;
+        }
+
+        const wasAbsent = this._inputDeviceWasAbsent;
+        this._inputDeviceWasAbsent = !present;
+
+        hdmiDebug('IN-HANDLER',
+            `state: present=${present} foundByLabel=${foundByLabel} ` +
+            `wasAbsent=${wasAbsent} preferredDeviceId=${preferredDeviceId ?? 'default'}`);
+
+        if (!present) {
+            // Mic absent — non-fatal (input goes silent).  Surface a transient
+            // notice on the absent transition so the user understands why input
+            // went silent (it was previously failing silently with no UI hint),
+            // then wait for the replug devicechange; reapplyInputDevice handles
+            // the dead/silent source on the way back. Auto-clear after 5 s like
+            // every other transient notice (the single error line is shared);
+            // a successful reapply also clears it explicitly below.
+            if (!wasAbsent && this.uiManager?.setError) {
+                this.uiManager.setError(
+                    'Microphone disconnected — audio input is silent until it is reconnected.',
+                    false);
+                setTimeout(() => this.uiManager?.clearError?.(), 5000);
+            }
+            return;
+        }
+
+        if (!wasAbsent && !foundByLabel) {
+            // Device was already present and id unchanged — not a replug event.
+            return;
+        }
+
+        // Replug transition detected — debounce against device oscillation.
+        if (this._inputDisconnectDebounceTimer) {
+            clearTimeout(this._inputDisconnectDebounceTimer);
+        }
+        hdmiDebug('IN-HANDLER', 'replug detected — debounce 3s scheduled');
+        this._inputDisconnectDebounceTimer = setTimeout(async () => {
+            this._inputDisconnectDebounceTimer = null;
+            hdmiDebug('IN-HANDLER', 'debounce fired');
+
+            // Re-confirm the device is still present after the oscillation window.
+            let devices2;
+            try { devices2 = await navigator.mediaDevices.enumerateDevices(); } catch (e) { return; }
+            const inputs2 = devices2.filter(d => d.kind === 'audioinput');
+            const stillPresent = prefs.inputDeviceId
+                ? inputs2.some(d => d.deviceId === preferredDeviceId ||
+                    (prefs.inputDeviceLabel && d.label === prefs.inputDeviceLabel))
+                : inputs2.some(d => d.label);
+            if (!stillPresent) {
+                hdmiDebug('IN-HANDLER', 'debounce: device gone again (transient) — skip');
+                return;
+            }
+
+            // Startup grace — avoid recovery churn right after launch.
+            if (Date.now() - this._appStartTime < 10000) {
+                hdmiDebug('IN-HANDLER', 'startup-grace blocked');
+                return;
+            }
+
+            // Cooldown — bound recovery attempts so an unstable link cannot loop.
+            const now = Date.now();
+            if (now - this._lastInputRecoveryTime < 10000) {
+                hdmiDebug('IN-HANDLER', 'cooldown blocked');
+                return;
+            }
+            this._lastInputRecoveryTime = now;
+
+            // A full reset already running (e.g. concurrent output recovery):
+            // skip the light reapply. The in-flight reset rebuilds the graph
+            // with the saved input; a stale reapply here would race its
+            // teardown (it nulls the worklet / closes the context).
+            if (this.audioManager._resetInProgress) {
+                hdmiDebug('IN-HANDLER', 'reset already in progress — skip light reapply');
+                return;
+            }
+
+            // Re-resolve the target device id from the POST-debounce
+            // enumeration: a USB id can change again across the oscillation
+            // window, so the 3 s-old preferredDeviceId may now be stale.
+            let freshPreferredId;
+            if (prefs.inputDeviceId) {
+                const f = inputs2.find(d => d.deviceId === prefs.inputDeviceId)
+                    || (prefs.inputDeviceLabel ? inputs2.find(d => d.label === prefs.inputDeviceLabel) : null);
+                freshPreferredId = f?.deviceId ?? prefs.inputDeviceId;
+            } else {
+                freshPreferredId = null;
+            }
+
+            // Persist pipeline state first so a watchdog-triggered force-relaunch
+            // (if the fallback reset somehow hangs) still preserves user config.
+            await this._savePipelineStateBeforeRisk();
+
+            const ok = await this.audioManager.ioManager.reapplyInputDevice(freshPreferredId);
+            if (ok) {
+                // Refresh the audioManager.sourceNode / window mirror so the rest
+                // of the app sees the new source node.
+                this.audioManager.updateExposedProperties();
+                // Mic recovered — clear any stale "disconnected"/fallback notice
+                // so it cannot linger as a now-false message.
+                this.uiManager?.clearError?.();
+                hdmiDebug('IN-HANDLER', 'light reapply succeeded');
+            } else {
+                console.warn('[handleInputDeviceChange] reapplyInputDevice failed, falling back to full reset');
+                hdmiDebug('IN-HANDLER', 'light reapply failed → reset(null)');
+                try {
+                    await this.audioManager.reset(null);
+                } catch (err) {
+                    console.error('[handleInputDeviceChange] reset(null) failed:', err);
+                }
+            }
+        }, 3000);
     }
 
     /**

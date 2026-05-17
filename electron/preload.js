@@ -117,7 +117,12 @@ contextBridge.exposeInMainWorld(
     // logging overhead.  See the try/catch above — defaults to false on any
     // sync-IPC failure so contextBridge.exposeInMainWorld never aborts.
     hdmiDebugEnabled: __hdmiDebugEnabled,
-    
+
+    // Forward a renderer-side log line to the main-process terminal.  Useful for
+    // diagnostics on packaged builds where DevTools is not exposed.  Pass-through
+    // only — there's no return path.
+    logToMain: (level, tag, text) => ipcRenderer.send('renderer-log', { level, tag, text }),
+
     // Request macOS microphone TCC permission (must be called before getUserMedia)
     requestMicrophoneAccess: () => ipcRenderer.invoke('request-microphone-access'),
 

@@ -68,6 +68,9 @@ export class PipelineProcessor {
             try {
                 this.contextManager.workletNode = new AudioWorkletNode(this.contextManager.audioContext, 'plugin-processor');
                 window.workletNode = this.contextManager.workletNode;
+                // Notify existing plugin instances so they re-bind their message
+                // listeners to this new port (old port is dead after a reset).
+                window.dispatchEvent(new Event('worklet-node-recreated'));
             } catch (error) {
                 console.error('Failed to create worklet node:', error);
                 return `Audio Error: Failed to create audio processor: ${error.message}`;

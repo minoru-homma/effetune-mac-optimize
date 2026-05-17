@@ -214,7 +214,51 @@ export class AudioIOManager {
             return `Audio Error: ${error.message}`;
         }
     }
-    
+
+    /**
+     * Acquire a microphone MediaStream using the saved device with a default-device
+     * fallback.  Mirrors the acquisition portion of initAudioInput() but returns the
+     * stream instead of wiring nodes, so the runtime reconnect path (reapplyInputDevice)
+     * can reuse the exact same getUserMedia logic without rebuilding the audio graph.
+     *
+     * The clearMicrophonePermission retry from initAudioInput() is intentionally NOT
+     * replicated: that path recovers a denied permission at startup, but a runtime
+     * device reconnect implies permission was already granted earlier in the session.
+     *
+     * @param {string|null} preferredDeviceId - saved input device id, or null for default
+     * @returns {Promise<{stream: MediaStream|null, error: Error|null}>}
+     */
+    async _acquireMicStream(preferredDeviceId) {
+        const audioConstraints = {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false
+        };
+        if (preferredDeviceId) {
+            audioConstraints.deviceId = { exact: preferredDeviceId };
+        }
+        try {
+            const stream = await this._getUserMediaWithTimeout({ audio: audioConstraints });
+            return { stream, error: null };
+        } catch (error) {
+            // If the saved device failed, retry once with the default device.
+            if (audioConstraints.deviceId) {
+                delete audioConstraints.deviceId;
+                try {
+                    const stream = await this._getUserMediaWithTimeout({ audio: audioConstraints });
+                    // The saved/preferred device failed and we silently bound to
+                    // the system default instead. Signal it so reconnection
+                    // callers can warn the user that input may not be the
+                    // device they expect.
+                    return { stream, error: null, usedFallback: true };
+                } catch (innerError) {
+                    return { stream: null, error: innerError };
+                }
+            }
+            return { stream: null, error };
+        }
+    }
+
     /**
      * Initialize audio output
      * @returns {Promise<string>} - Empty string on success, error message on failure
@@ -707,7 +751,115 @@ export class AudioIOManager {
             return false;
         }
     }
-    
+
+    /**
+     * Light runtime re-acquisition of the microphone after a USB unplug/replug,
+     * WITHOUT tearing down the AudioContext / worklet / output path.  This keeps
+     * music playback and output uninterrupted while only the input source is
+     * swapped (source → worklet is the single edge that gets rewired).
+     *
+     * Returns false on any ambiguity so the caller can fall back to a full
+     * audioManager.reset(null) — the proven heavyweight recovery.
+     *
+     * @param {string|null} preferredDeviceId - saved input device id, or null for default
+     * @returns {Promise<boolean>} true if a live mic source was reconnected
+     */
+    // Surface a non-fatal notice when mic acquisition silently fell back to
+    // the system default (the preferred/saved device was unavailable on
+    // replug, so input may not be the device the user expects).
+    _warnIfMicFallback(usedFallback) {
+        if (!usedFallback) return;
+        try {
+            if (typeof window !== 'undefined' && window.uiManager?.setError) {
+                window.uiManager.setError(
+                    'Preferred microphone unavailable — using the system default input device.',
+                    false);
+                // Auto-clear like every other transient notice (shared single
+                // error line) so it cannot linger as a stale message.
+                setTimeout(() => {
+                    try { window.uiManager?.clearError?.(); } catch (_) { /* ignore */ }
+                }, 5000);
+            }
+        } catch (_) { /* notice is best-effort, never break recovery */ }
+    }
+
+    async reapplyInputDevice(preferredDeviceId) {
+        hdmiDebug('REAPPLY-IN', `start preferredDeviceId=${preferredDeviceId ?? 'default'}`);
+
+        // Player-owns-source guard: while the file player is active with
+        // useInputWithPlayer=false, the player has swapped audioManager.sourceNode
+        // for its own buffer/media source and stashed the mic source in
+        // contextManager.originalSourceNode (restored on player stop).  In that
+        // state the mic must NOT be connected to the worklet (would bleed into
+        // playback), and this.sourceNode must NOT be touched (player owns it).
+        const useInputWithPlayer = !!window.electronIntegration?.audioPreferences?.useInputWithPlayer;
+        const playerCtxMgr = window.uiManager?.audioPlayer?.contextManager;
+        const playerOwnsSource = !!playerCtxMgr?.originalSourceNode;
+        if (playerOwnsSource && !useInputWithPlayer) {
+            const oldStream = this.stream;
+            const oldOriginalNode = playerCtxMgr.originalSourceNode;
+            const { stream, usedFallback } = await this._acquireMicStream(preferredDeviceId);
+            if (!stream) {
+                hdmiDebug('REAPPLY-IN', 'player-owned: acquire failed → false');
+                return false;
+            }
+            try {
+                playerCtxMgr.originalSourceNode = this.contextManager.audioContext.createMediaStreamSource(stream);
+            } catch (e) {
+                hdmiDebug('REAPPLY-IN', `player-owned: createMediaStreamSource failed: ${e.message ?? e}`);
+                stream.getTracks().forEach(t => t.stop());
+                return false;
+            }
+            this.stream = stream;
+            // Defensive: the old node was disconnected when the player took
+            // over, but disconnect() again so a lingering edge cannot survive
+            // the swap (symmetric with the non-player branch below).
+            try { oldOriginalNode?.disconnect(); } catch (_) { /* ignore */ }
+            try { oldStream?.getTracks().forEach(t => t.stop()); } catch (_) { /* ignore */ }
+            this._warnIfMicFallback(usedFallback);
+            hdmiDebug('REAPPLY-IN', 'player-owned: updated originalSourceNode (not wired to worklet)');
+            return true;
+        }
+
+        const oldStream = this.stream;
+        const oldSource = this.sourceNode;
+
+        const { stream, error, usedFallback } = await this._acquireMicStream(preferredDeviceId);
+        if (!stream) {
+            hdmiDebug('REAPPLY-IN', `acquire failed (${error?.name ?? 'unknown'}) → false`);
+            return false;
+        }
+        this._warnIfMicFallback(usedFallback);
+
+        // Stop the old (dead) tracks and detach the old source.  This also
+        // correctly handles the silent-gain fallback case: oldStream is null and
+        // oldSource is a GainNode, so only disconnect() runs (no tracks to stop).
+        try { oldSource?.disconnect(); } catch (_) { /* ignore */ }
+        try { oldStream?.getTracks().forEach(t => t.stop()); } catch (_) { /* ignore */ }
+
+        if (!this.contextManager.workletNode) {
+            hdmiDebug('REAPPLY-IN', 'no workletNode → false (defer to reset)');
+            return false;
+        }
+
+        try {
+            this.stream = stream;
+            this.sourceNode = this.contextManager.audioContext.createMediaStreamSource(stream);
+            // Same connect guard as connectAudioNodes()
+            if (window.originalConnectMethod && this.contextManager.isFirstLaunch) {
+                window.originalConnectMethod.call(this.sourceNode, this.contextManager.workletNode);
+            } else {
+                this.sourceNode.connect(this.contextManager.workletNode);
+            }
+        } catch (e) {
+            hdmiDebug('REAPPLY-IN', `wire failed: ${e.message ?? e} → false`);
+            return false;
+        }
+
+        hdmiDebug('REAPPLY-IN', 'done (mic source reconnected)');
+        return true;
+    }
+
     /**
      * Start periodic polling to verify audio output device is active.
      * Fallback for macOS where HDMI reconnection may not trigger devicechange.

@@ -23,12 +23,29 @@ class PluginBase {
         // Processor storage
         this.processorString = null;
         this.compiledFunction = null;
+        // Raw WASM bytes retained so the module can be re-registered with a
+        // freshly created worklet after an audio reset (same recreation-healing
+        // contract as processorString — see _onWorkletNodeRecreated).
+        this._wasmBytes = null;
 
         // Flag to track message handler registration
         this._hasMessageHandler = false;
+        // The MessagePort we attached our message listener to.  Tracked so we can
+        // detach from the correct (possibly stale) port and re-attach when the
+        // AudioWorkletNode is recreated by an audio reset — otherwise the plugin
+        // keeps listening on the dead port and its meters/graphs freeze.
+        this._messagePort = null;
 
         // Bind _handleMessage only once for performance
         this._boundHandleMessage = this._handleMessage.bind(this);
+
+        // Heal plugin state whenever the worklet node is recreated (audio
+        // reset / sample-rate change): re-bind the message listener AND
+        // re-register the DSP processor with the brand-new worklet.  Decoupled
+        // via a window event so nested plugins self-heal without the manager
+        // enumerating them.
+        this._boundOnWorkletRecreated = this._onWorkletNodeRecreated.bind(this);
+        window.addEventListener('worklet-node-recreated', this._boundOnWorkletRecreated);
 
         // If workletNode exists, set up the message handler immediately
         if (window.workletNode) {
@@ -53,15 +70,92 @@ class PluginBase {
         if (!this._hasMessageHandler && window.workletNode) {
             window.workletNode.port.addEventListener('message', this._boundHandleMessage);
             this._hasMessageHandler = true;
+            this._messagePort = window.workletNode.port;
         }
     }
-    
+
+    /**
+     * Re-attach the message listener to the current worklet port after the
+     * AudioWorkletNode has been recreated (e.g. by audioManager.reset()).
+     * Plugins that overrode _setupMessageHandler() to a no-op never set
+     * _hasMessageHandler, so they are correctly skipped here.
+     */
+    refreshMessageHandler() {
+        if (!this._hasMessageHandler || !window.workletNode) return;
+        const currentPort = window.workletNode.port;
+        if (this._messagePort === currentPort) return;
+        if (this._messagePort) {
+            try { this._messagePort.removeEventListener('message', this._boundHandleMessage); } catch (_) { /* ignore */ }
+        }
+        currentPort.addEventListener('message', this._boundHandleMessage);
+        this._messagePort = currentPort;
+    }
+
+    /**
+     * Heal this plugin against a freshly created AudioWorkletNode.
+     *
+     * A reset (audioManager.reset / sample-rate change) builds a brand-new
+     * worklet whose processor registry is EMPTY.  rebuildPipeline only resends
+     * the plugin list + parameters (updatePlugins), NOT the compiled DSP code,
+     * so without re-registering here the new worklet runs every plugin as a
+     * pass-through: audio still flows but no processing and no measurements are
+     * produced, freezing every meter/analyzer UI.
+     */
+    _onWorkletNodeRecreated() {
+        this.refreshMessageHandler();
+
+        // Re-register the DSP processor with the new worklet.  Only plugins
+        // that actually registered one have a processorString; skip the rest.
+        if (this.processorString && window.workletNode) {
+            try {
+                window.workletNode.port.postMessage({
+                    type: 'registerProcessor',
+                    pluginType: this.constructor.name,
+                    processor: this.processorString,
+                    process: this.process.toString()
+                });
+            } catch (e) {
+                // A failed re-register means this plugin runs as a silent
+                // pass-through on the new worklet (audio flows, no processing,
+                // frozen meters) — the exact freeze this method exists to
+                // prevent. Surface it instead of hiding the regression.
+                console.error('[plugin-base] processor re-register failed after worklet recreate for',
+                    this.constructor.name, e);
+            }
+        }
+
+        // Same contract for WASM-ported plugins: the new worklet's wasmModules
+        // Map is empty and rebuildPipeline does not resend it, so without this
+        // the plugin runs as a pass-through (no audio, no measurements) after a
+        // device-reconnect reset.  Re-send the retained bytes.
+        if (this._wasmBytes && window.workletNode) {
+            try {
+                window.workletNode.port.postMessage({
+                    type: 'registerWasmBytes',
+                    pluginType: this.constructor.name,
+                    bytes: this._wasmBytes.slice(0)
+                });
+            } catch (e) {
+                console.error('[plugin-base] WASM re-register failed after worklet recreate for',
+                    this.constructor.name, '— plugin will run JS/pass-through:', e);
+            }
+        }
+    }
+
     // Clean up resources when plugin is removed
     cleanup() {
-        // Remove message event listener to prevent memory leaks
-        if (this._hasMessageHandler && window.workletNode) {
-            window.workletNode.port.removeEventListener('message', this._boundHandleMessage);
+        // Stop listening for worklet recreation events
+        window.removeEventListener('worklet-node-recreated', this._boundOnWorkletRecreated);
+
+        // Remove message event listener from the port we actually attached to
+        // (window.workletNode may already point at a newer port after a reset).
+        if (this._hasMessageHandler) {
+            const port = this._messagePort || (window.workletNode && window.workletNode.port);
+            if (port) {
+                try { port.removeEventListener('message', this._boundHandleMessage); } catch (_) { /* ignore */ }
+            }
             this._hasMessageHandler = false;
+            this._messagePort = null;
         }
         
         // Clear any pending timeouts
@@ -149,6 +243,72 @@ class PluginBase {
                 process: this.process.toString()
             });
         }
+    }
+
+    // Register WebAssembly module bytes for this plugin type. We send the raw
+    // ArrayBuffer (always structured-clonable) and the worklet compiles it via
+    // synchronous `new WebAssembly.Module(bytes)` on receipt. This is more
+    // reliable than sending a pre-compiled WebAssembly.Module across the
+    // AudioWorklet message port in Chromium.
+    //
+    // The async fetch may resolve before window.workletNode exists (the
+    // AudioWorklet is loaded lazily after the GUI renders), so we retry until
+    // the worklet is up.
+    registerWasmModule(wasmBytes) {
+        // Accept either an ArrayBuffer (preferred) or a precompiled Module
+        // (legacy callers). For Modules we also keep the original around for
+        // offline processing on the main thread.
+        if (wasmBytes instanceof WebAssembly.Module) {
+            this.wasmModule = wasmBytes;
+            // We can't reliably ship a Module across the AudioWorklet boundary,
+            // so callers that already have a Module should not be using this
+            // path. Bail without sending anything.
+            return;
+        }
+        if (!(wasmBytes instanceof ArrayBuffer) && !ArrayBuffer.isView(wasmBytes)) {
+            console.warn('[plugin-base] registerWasmModule: expected ArrayBuffer');
+            return;
+        }
+        const buffer = wasmBytes instanceof ArrayBuffer ? wasmBytes : wasmBytes.buffer;
+        // Pre-compile on the main thread too so executeProcessor() (offline path)
+        // can use the same module without re-compiling.
+        try {
+            this.wasmModule = new WebAssembly.Module(buffer);
+        } catch (e) {
+            console.warn('[plugin-base] WebAssembly.compile failed:', e.message);
+            return;
+        }
+        // Retain the raw bytes so _onWorkletNodeRecreated() can re-register
+        // with a new worklet after a reset (the new worklet's wasmModules Map
+        // starts empty; rebuildPipeline does not resend WASM).
+        this._wasmBytes = buffer;
+        const send = () => {
+            if (!window.workletNode) return false;
+            // Send a structured-clone copy of the bytes (transfer would detach
+            // the original which we still want for the offline path).
+            window.workletNode.port.postMessage({
+                type: 'registerWasmBytes',
+                pluginType: this.constructor.name,
+                bytes: buffer.slice(0)
+            });
+            return true;
+        };
+        if (send()) return;
+        let attempts = 0;
+        const handle = setInterval(() => {
+            attempts++;
+            if (send()) {
+                clearInterval(handle);
+            } else if (attempts > 150) {
+                clearInterval(handle);
+                // Worklet never came up within ~30 s: the plugin keeps running
+                // the JS path with no further attempt. Make the silent
+                // permanent degradation observable.
+                console.warn('[plugin-base] gave up sending WASM to worklet after',
+                    attempts, 'attempts for', this.constructor.name,
+                    '— plugin will use the JS path until the next reset');
+            }
+        }, 200);
     }
 
     // Execute the compiled processor function for offline processing.
