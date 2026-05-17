@@ -905,7 +905,28 @@ class App {
             `currentSink=${currentSink} activeDeviceId=${activeDeviceId} ctxState=${ctx?.state}`);
 
         if (typeof currentSink === 'undefined') {
-            if (foundDevice) await this.audioManager.reset(null);
+            // Direct-output mode (multi-channel / low-latency stereo): no sinkId
+            // object to reapply, so recovery needs a full rebuild / relaunch.
+            // Trigger it ONLY on a genuine output reconnect (absent→present) or
+            // an ID change (label match) — NOT on every unrelated devicechange
+            // (e.g. a USB mic plug), which previously forced a spurious full
+            // rebuild.
+            if (foundDevice && (wasAbsent || foundByLabel)) {
+                if (window.electronAPI?.platform === 'darwin') {
+                    // macOS HDMI: reset(null) cannot recover stuck CoreAudio and
+                    // tends to hang — defer to the relaunch handler (cooldown +
+                    // startup-grace gated, saves pipeline state internally, no-op
+                    // outside the gate).  Consistent with the sink-mode macOS path.
+                    await this._doMacosRelaunch();
+                } else {
+                    await this._savePipelineStateBeforeRisk();
+                    try {
+                        await this.audioManager.reset(null);
+                    } catch (err) {
+                        console.error('[handleOutputDeviceChange] direct-mode reconnect reset failed:', err);
+                    }
+                }
+            }
             return;
         }
 
