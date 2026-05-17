@@ -774,6 +774,11 @@ export class AudioIOManager {
                 window.uiManager.setError(
                     'Preferred microphone unavailable — using the system default input device.',
                     false);
+                // Auto-clear like every other transient notice (shared single
+                // error line) so it cannot linger as a stale message.
+                setTimeout(() => {
+                    try { window.uiManager?.clearError?.(); } catch (_) { /* ignore */ }
+                }, 5000);
             }
         } catch (_) { /* notice is best-effort, never break recovery */ }
     }

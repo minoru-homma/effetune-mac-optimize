@@ -190,7 +190,10 @@ fn clamp(x: f64, lo: f64, hi: f64) -> f64 {
 
 #[inline]
 fn pow10(x: f64) -> f64 {
-    // Mirror JS `Math.pow(10, x)` rather than exp(x*ln10) for exact parity.
+    // Mirror JS `Math.pow(10, x)` (not exp(x*ln10)) so the formula matches the
+    // reference. Both are libm doubles; IEEE-754 does not require pow/sin/cos
+    // to be correctly-rounded, so parity is within rounding, not bit-guaranteed
+    // across every platform — the A/B gate's tolerance accounts for this.
     10.0_f64.powf(x)
 }
 

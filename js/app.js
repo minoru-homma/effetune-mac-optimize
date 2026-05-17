@@ -1102,15 +1102,18 @@ class App {
             `wasAbsent=${wasAbsent} preferredDeviceId=${preferredDeviceId ?? 'default'}`);
 
         if (!present) {
-            // Mic absent — non-fatal (input goes silent).  Surface a one-shot
+            // Mic absent — non-fatal (input goes silent).  Surface a transient
             // notice on the absent transition so the user understands why input
             // went silent (it was previously failing silently with no UI hint),
             // then wait for the replug devicechange; reapplyInputDevice handles
-            // the dead/silent source on the way back.
+            // the dead/silent source on the way back. Auto-clear after 5 s like
+            // every other transient notice (the single error line is shared);
+            // a successful reapply also clears it explicitly below.
             if (!wasAbsent && this.uiManager?.setError) {
                 this.uiManager.setError(
                     'Microphone disconnected — audio input is silent until it is reconnected.',
                     false);
+                setTimeout(() => this.uiManager?.clearError?.(), 5000);
             }
             return;
         }
@@ -1186,6 +1189,9 @@ class App {
                 // Refresh the audioManager.sourceNode / window mirror so the rest
                 // of the app sees the new source node.
                 this.audioManager.updateExposedProperties();
+                // Mic recovered — clear any stale "disconnected"/fallback notice
+                // so it cannot linger as a now-false message.
+                this.uiManager?.clearError?.();
                 hdmiDebug('IN-HANDLER', 'light reapply succeeded');
             } else {
                 console.warn('[handleInputDeviceChange] reapplyInputDevice failed, falling back to full reset');

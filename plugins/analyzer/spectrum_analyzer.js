@@ -467,8 +467,15 @@ class SpectrumAnalyzerPlugin extends PluginBase {
         // recycle) never exhaust the cap — only a tight, genuinely
         // unrecoverable loss loop does.
         this._gpuReinitConsecutiveFailures = (this._gpuReinitConsecutiveFailures || 0) + 1;
-        if (this._gpuReinitConsecutiveFailures > 8) {
-            gpuLogToMain('warn', `device lost (${reason}) — giving up WebGPU after ${this._gpuReinitConsecutiveFailures - 1} consecutive failed re-init attempts`);
+        // Lifetime backstop (never reset on success): a flaky *real* GPU whose
+        // init() succeeds every cycle but loses the device ~1 s later would
+        // otherwise reset the consecutive-failure streak each success and
+        // re-init forever. Cap total lifetime re-inits so that pathological
+        // loop is bounded too, while still allowing many routine sleep/wake
+        // losses across a long session.
+        this._gpuReinitTotal = (this._gpuReinitTotal || 0) + 1;
+        if (this._gpuReinitConsecutiveFailures > 8 || this._gpuReinitTotal > 64) {
+            gpuLogToMain('warn', `device lost (${reason}) — giving up WebGPU (consecutive failures=${this._gpuReinitConsecutiveFailures - 1}, lifetime re-inits=${this._gpuReinitTotal - 1})`);
             // Reveal the dedicated, never-poisoned Canvas 2D fallback.
             this._setGpuLayerVisible(false);
             return;
