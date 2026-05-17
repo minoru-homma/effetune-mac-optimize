@@ -23,6 +23,10 @@ class PluginBase {
         // Processor storage
         this.processorString = null;
         this.compiledFunction = null;
+        // Raw WASM bytes retained so the module can be re-registered with a
+        // freshly created worklet after an audio reset (same recreation-healing
+        // contract as processorString — see _onWorkletNodeRecreated).
+        this._wasmBytes = null;
 
         // Flag to track message handler registration
         this._hasMessageHandler = false;
@@ -109,6 +113,20 @@ class PluginBase {
                     pluginType: this.constructor.name,
                     processor: this.processorString,
                     process: this.process.toString()
+                });
+            } catch (_) { /* ignore */ }
+        }
+
+        // Same contract for WASM-ported plugins: the new worklet's wasmModules
+        // Map is empty and rebuildPipeline does not resend it, so without this
+        // the plugin runs as a pass-through (no audio, no measurements) after a
+        // device-reconnect reset.  Re-send the retained bytes.
+        if (this._wasmBytes && window.workletNode) {
+            try {
+                window.workletNode.port.postMessage({
+                    type: 'registerWasmBytes',
+                    pluginType: this.constructor.name,
+                    bytes: this._wasmBytes.slice(0)
                 });
             } catch (_) { /* ignore */ }
         }
@@ -250,6 +268,10 @@ class PluginBase {
             console.warn('[plugin-base] WebAssembly.compile failed:', e.message);
             return;
         }
+        // Retain the raw bytes so _onWorkletNodeRecreated() can re-register
+        // with a new worklet after a reset (the new worklet's wasmModules Map
+        // starts empty; rebuildPipeline does not resend WASM).
+        this._wasmBytes = buffer;
         const send = () => {
             if (!window.workletNode) return false;
             // Send a structured-clone copy of the bytes (transfer would detach
