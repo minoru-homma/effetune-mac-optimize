@@ -259,7 +259,11 @@ class SpectrumAnalyzerPlugin extends PluginBase {
         // Lazily (re)create the WASM instance for the current FFT size.
         if (this._wasmModule && this._wasmPt !== this.pt) {
             try {
-                if (this._wasm) this._wasmModule.exports?.free_state?.(this._wasm.sp);
+                // free_state lives on the Instance exports (this._wasm.ex),
+                // NOT on the WebAssembly.Module — `this._wasmModule.exports`
+                // is always undefined, so the old form never freed anything
+                // and leaked the previous instance's linear memory.
+                if (this._wasm && this._wasm.ex) this._wasm.ex.free_state?.(this._wasm.sp);
             } catch (_) { /* ignore */ }
             this._wasm = null;
         }
@@ -435,6 +439,16 @@ class SpectrumAnalyzerPlugin extends PluginBase {
         });
     }
 
+    // Toggle the dedicated WebGPU canvas (and its stacked text-label overlay)
+    // on/off. Hiding them reveals the always-valid Canvas 2D base canvas
+    // underneath — which WebGPU never claimed, so getContext('2d') keeps
+    // working even after a WebGPU failure or device loss.
+    _setGpuLayerVisible(visible) {
+        const disp = visible ? 'block' : 'none';
+        if (this.gpuCanvas) this.gpuCanvas.style.display = disp;
+        if (this.labelCanvas) this.labelCanvas.style.display = disp;
+    }
+
     // Recover from an unexpected WebGPU device loss (GPU process recycle,
     // sleep/wake, driver update, GC) by re-initialising the renderer on the
     // same canvas with a fresh adapter/device.  Without this the shared canvas
@@ -447,18 +461,27 @@ class SpectrumAnalyzerPlugin extends PluginBase {
             }
         };
         if (this._gpuReinitInProgress) return;
-        this._gpuReinitCount = (this._gpuReinitCount || 0) + 1;
-        if (this._gpuReinitCount > 8) {
-            gpuLogToMain('warn', `device lost (${reason}) — giving up WebGPU after ${this._gpuReinitCount - 1} re-init attempts`);
+        // Count *consecutive* failed re-init attempts. The streak is reset to
+        // 0 on a successful recovery (below), so routine device losses spread
+        // across the app's lifetime (sleep/wake, driver update, GPU process
+        // recycle) never exhaust the cap — only a tight, genuinely
+        // unrecoverable loss loop does.
+        this._gpuReinitConsecutiveFailures = (this._gpuReinitConsecutiveFailures || 0) + 1;
+        if (this._gpuReinitConsecutiveFailures > 8) {
+            gpuLogToMain('warn', `device lost (${reason}) — giving up WebGPU after ${this._gpuReinitConsecutiveFailures - 1} consecutive failed re-init attempts`);
+            // Reveal the dedicated, never-poisoned Canvas 2D fallback.
+            this._setGpuLayerVisible(false);
             return;
         }
         this._gpuReinitInProgress = true;
         // Drop the dead renderer immediately so drawGraph() does not call
-        // render() on it during the async re-init window.
+        // render() on it during the async re-init window, and hide the GPU
+        // layer so the Canvas 2D fallback draws while we recover.
         const dead = this._gpu;
         this._gpu = null;
         try { if (dead) dead.destroy(); } catch (_) { /* ignore */ }
-        gpuLogToMain('warn', `device lost (${reason}) — re-initialising WebGPU (attempt ${this._gpuReinitCount})`);
+        this._setGpuLayerVisible(false);
+        gpuLogToMain('warn', `device lost (${reason}) — re-initialising WebGPU (attempt ${this._gpuReinitConsecutiveFailures})`);
         // Small delay: the GPU stack is often briefly unstable right after a
         // loss (process recycle / wake), so an immediate retry tends to fail.
         setTimeout(() => {
@@ -468,7 +491,7 @@ class SpectrumAnalyzerPlugin extends PluginBase {
                 this._gpuReinitInProgress = false;
                 return;
             }
-            const renderer = new window.SpectrumAnalyzerGpuRenderer(this.canvas);
+            const renderer = new window.SpectrumAnalyzerGpuRenderer(this.gpuCanvas || this.canvas);
             renderer.init().then((ok) => {
                 this._gpuReinitInProgress = false;
                 if (!ok) {
@@ -476,7 +499,11 @@ class SpectrumAnalyzerPlugin extends PluginBase {
                     return;
                 }
                 this._gpu = renderer;
+                // Recovered — clear the consecutive-failure streak so the cap
+                // only ever trips on a genuinely unrecoverable loss loop.
+                this._gpuReinitConsecutiveFailures = 0;
                 renderer.onDeviceLost = (r) => this._handleGpuDeviceLost(r);
+                this._setGpuLayerVisible(true);
                 this._gpuConfigureNow();
                 if (typeof this._drawStaticOverlay === 'function') this._drawStaticOverlay();
                 try { this.drawGraph(); } catch (_) { /* ignore */ }
@@ -594,11 +621,28 @@ class SpectrumAnalyzerPlugin extends PluginBase {
         graphContainer.className = 'graph-container';
         graphContainer.style.position = 'relative'; graphContainer.style.width = '1024px'; graphContainer.style.height = '480px';
         
+        // Base canvas: ALWAYS the Canvas 2D fallback target. getContext('webgpu')
+        // is never called on it, so getContext('2d') keeps working even after a
+        // WebGPU failure / device loss — the dedicated gpuCanvas below is what
+        // the WebGPU renderer claims instead.
         const canvas = document.createElement('canvas');
         canvas.width = 2048; canvas.height = 960;
         canvas.style.width = '1024px'; canvas.style.height = '480px';
         graphContainer.appendChild(canvas);
         this.canvas = canvas;
+
+        // Dedicated WebGPU canvas, stacked over the 2D canvas. Visible only
+        // while a WebGPU renderer is active; hidden (revealing the 2D canvas)
+        // whenever WebGPU is unavailable, fails, or is given up after a loss.
+        const gpuCanvas = document.createElement('canvas');
+        gpuCanvas.width = canvas.width; gpuCanvas.height = canvas.height;
+        gpuCanvas.style.width = canvas.style.width;
+        gpuCanvas.style.height = canvas.style.height;
+        gpuCanvas.style.position = 'absolute';
+        gpuCanvas.style.left = '0'; gpuCanvas.style.top = '0';
+        gpuCanvas.style.display = 'none';
+        graphContainer.appendChild(gpuCanvas);
+        this.gpuCanvas = gpuCanvas;
 
         // Wait for the GPU renderer script to load (it was kicked off in the
         // constructor via _loadGpuRenderer). On macOS it's typically already
@@ -629,7 +673,7 @@ class SpectrumAnalyzerPlugin extends PluginBase {
                     gpuLogToMain('info', 'navigator.gpu unavailable, using Canvas 2D');
                     return;
                 }
-                const renderer = new window.SpectrumAnalyzerGpuRenderer(canvas);
+                const renderer = new window.SpectrumAnalyzerGpuRenderer(gpuCanvas);
                 renderer.init().then((ok) => {
                     this._gpuPending = false;
                     if (!ok) {
@@ -637,6 +681,7 @@ class SpectrumAnalyzerPlugin extends PluginBase {
                         return;
                     }
                     this._gpu = renderer;
+                    this._gpuReinitConsecutiveFailures = 0;
                     renderer.onDeviceLost = (reason) => this._handleGpuDeviceLost(reason);
                     this._gpuConfigureNow();
                     // Label overlay (axis text + dB labels) lives on a sibling
@@ -656,6 +701,9 @@ class SpectrumAnalyzerPlugin extends PluginBase {
                     label.style.backgroundColor = 'transparent';
                     graphContainer.appendChild(label);
                     this.labelCanvas = label;
+                    // Reveal the GPU layer (gpuCanvas + label) now that the
+                    // renderer is live; the 2D base canvas stays underneath.
+                    this._setGpuLayerVisible(true);
                     if (typeof this._drawStaticOverlay === 'function') {
                         this._drawStaticOverlay();
                     }
@@ -757,10 +805,19 @@ class SpectrumAnalyzerPlugin extends PluginBase {
         });
         this.boundEventListeners.clear();
         this.lastProcessTime = performance.now() / 1000;
+        // Free the main-thread WASM instance's State so its linear memory is
+        // not retained until JS GC. free_state lives on the Instance exports
+        // (this._wasm.ex), not the Module.
+        if (this._wasm && this._wasm.ex) {
+            try { this._wasm.ex.free_state?.(this._wasm.sp); } catch (_) { /* ignore */ }
+        }
+        this._wasm = null;
+        this._wasmPt = 0;
         if (this._gpu) {
             try { this._gpu.destroy(); } catch (_) { /* ignore */ }
             this._gpu = null;
         }
+        this._setGpuLayerVisible(false);
     }
 
     drawGraph() {
@@ -782,16 +839,15 @@ class SpectrumAnalyzerPlugin extends PluginBase {
                 }
                 try { this._gpu.destroy(); } catch (_) { /* ignore */ }
                 this._gpu = null;
-                // The canvas was claimed by the WebGPU context; getContext('2d')
-                // would now return null. Skip this frame; subsequent frames
-                // hit `if (!ctx) return;` below and stay quiet until the user
-                // reloads. This is the documented device-lost behaviour.
-                return;
+                // The 2D canvas is a SEPARATE element that WebGPU never
+                // claimed, so hiding the GPU layer reveals a fully working
+                // Canvas 2D surface. Fall through and draw this frame on it.
+                this._setGpuLayerVisible(false);
             }
         }
 
         const ctx = this.canvas.getContext('2d', { alpha: false });
-        if (!ctx) return; // GPU context was previously requested on this canvas.
+        if (!ctx) return; // 2D unexpectedly unavailable — skip this frame.
         const width = this.canvas.width;
         const height = this.canvas.height;
 

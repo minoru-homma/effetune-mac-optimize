@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "five_band_peq"
 version = "0.1.0"
+dependencies = [
+ "peq_dsp",
+]
+
+[[package]]
+name = "peq_dsp"
+version = "0.1.0"

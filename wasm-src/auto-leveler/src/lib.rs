@@ -61,8 +61,15 @@ pub struct State {
     pre: BiquadState,
     shelf: BiquadState,
 
-    // Circular buffer of weighted-square samples
+    // Circular buffer of weighted-square samples. Allocated once at init to
+    // the maximum window (10 s); `window_samples` is the active modulo/divisor
+    // derived from window_ms. This mirrors the JS reference, which only
+    // (re)allocates its buffer / resets `sum` on init or sample-rate change —
+    // NEVER on a window-length change (it just recomputes the modulo). The old
+    // code reallocated + zeroed sum on every window change, producing a
+    // momentary LUFS dropout the JS path does not have.
     lufs_buf: Vec<f32>,
+    window_samples: usize,
     buf_index: usize,
     buf_filled: bool,
     sum: f32,
@@ -83,9 +90,10 @@ pub extern "C" fn init(sample_rate: f32, channel_count: u32, max_block_size: u32
     let ch = channel_count.min(MAX_CHANNELS as u32);
     let bs = max_block_size as usize;
     // Initial buffer sized for 10s max window (the JS upper bound).
-    let max_window_samples = ((10000.0_f32 * sample_rate) / 1000.0) as usize;
-    let initial_window = ((3000.0_f32 * sample_rate) / 1000.0) as usize;
-    let _ = max_window_samples;
+    let max_window_samples = (((10000.0_f32 * sample_rate) / 1000.0) as usize).max(1);
+    let initial_window = (((3000.0_f32 * sample_rate) / 1000.0) as usize)
+        .max(1)
+        .min(max_window_samples);
     let state = Box::new(State {
         sample_rate,
         channel_count: ch,
@@ -107,7 +115,8 @@ pub extern "C" fn init(sample_rate: f32, channel_count: u32, max_block_size: u32
         release_coeff_inv: 0.0,
         pre: BiquadState::default(),
         shelf: BiquadState::default(),
-        lufs_buf: vec![0.0; initial_window.max(1)],
+        lufs_buf: vec![0.0; max_window_samples],
+        window_samples: initial_window,
         buf_index: 0,
         buf_filled: false,
         sum: 0.0,
@@ -178,15 +187,13 @@ pub extern "C" fn set_params(
     s.attack_coeff_inv = 1.0 - s.attack_coeff;
     s.release_coeff_inv = 1.0 - s.release_coeff;
 
-    // Resize circular buffer if window changed.
-    let window_samples = ((window_ms * s.sample_rate) / 1000.0) as usize;
-    let window_samples = window_samples.max(1);
-    if window_samples != s.lufs_buf.len() {
-        s.lufs_buf = vec![0.0; window_samples];
-        s.buf_index = 0;
-        s.buf_filled = false;
-        s.sum = 0.0;
-    }
+    // Window change: only update the modulo/divisor — keep the buffer, sum,
+    // index and filled flag (mirrors the JS reference, which never resets
+    // these on a window-length change). Clamp to the pre-allocated capacity
+    // so a tw beyond 10 s cannot index out of bounds (the JS path indexes
+    // past its buffer here and corrupts `sum` with NaN — we stay safe).
+    let window_samples = (((window_ms * s.sample_rate) / 1000.0) as usize).max(1);
+    s.window_samples = window_samples.min(s.lufs_buf.len());
 }
 
 #[inline(always)]
@@ -245,7 +252,7 @@ pub extern "C" fn process_block(state: *mut State, block_size: u32) {
     }
 
     // 3. Update circular sum buffer with squared values.
-    let window_samples = s.lufs_buf.len();
+    let window_samples = s.window_samples.max(1).min(s.lufs_buf.len());
     let mut sum_change = 0.0_f32;
     let start_idx = s.buf_index;
     let end_idx = (start_idx + bs) % window_samples;

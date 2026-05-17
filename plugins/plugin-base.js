@@ -114,7 +114,14 @@ class PluginBase {
                     processor: this.processorString,
                     process: this.process.toString()
                 });
-            } catch (_) { /* ignore */ }
+            } catch (e) {
+                // A failed re-register means this plugin runs as a silent
+                // pass-through on the new worklet (audio flows, no processing,
+                // frozen meters) — the exact freeze this method exists to
+                // prevent. Surface it instead of hiding the regression.
+                console.error('[plugin-base] processor re-register failed after worklet recreate for',
+                    this.constructor.name, e);
+            }
         }
 
         // Same contract for WASM-ported plugins: the new worklet's wasmModules
@@ -128,7 +135,10 @@ class PluginBase {
                     pluginType: this.constructor.name,
                     bytes: this._wasmBytes.slice(0)
                 });
-            } catch (_) { /* ignore */ }
+            } catch (e) {
+                console.error('[plugin-base] WASM re-register failed after worklet recreate for',
+                    this.constructor.name, '— plugin will run JS/pass-through:', e);
+            }
         }
     }
 
@@ -287,8 +297,16 @@ class PluginBase {
         let attempts = 0;
         const handle = setInterval(() => {
             attempts++;
-            if (send() || attempts > 150) {
+            if (send()) {
                 clearInterval(handle);
+            } else if (attempts > 150) {
+                clearInterval(handle);
+                // Worklet never came up within ~30 s: the plugin keeps running
+                // the JS path with no further attempt. Make the silent
+                // permanent degradation observable.
+                console.warn('[plugin-base] gave up sending WASM to worklet after',
+                    attempts, 'attempts for', this.constructor.name,
+                    '— plugin will use the JS path until the next reset');
             }
         }, 200);
     }

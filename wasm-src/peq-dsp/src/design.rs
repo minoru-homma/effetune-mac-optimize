@@ -1,6 +1,11 @@
 //! RBJ-cookbook biquad coefficient design, mirroring `plugins/eq/five_band_peq.js`.
 //! Returns (coefficients, bypassed). When `bypassed` is true the band should be
 //! skipped entirely (identity transfer).
+//!
+//! All arithmetic is f64 to match the JS reference (JS `Number` is IEEE-754
+//! double, `Math.*` are double). Inputs arrive as f32 over the WASM ABI
+//! (`set_band`) — that single boundary quantization is unavoidable without
+//! changing the JS glue, but the coefficient algebra itself now matches JS.
 
 use crate::biquad::Coeffs;
 use crate::{
@@ -8,12 +13,12 @@ use crate::{
     FT_PEAKING,
 };
 
-const PI: f32 = core::f32::consts::PI;
-const TWO_PI: f32 = 2.0 * PI;
-const BYPASS_THRESHOLD: f32 = 0.01;
-const A0_THRESHOLD: f32 = 1e-8;
-const SHELF_Q_MAX: f32 = 2.0;
-const GENERAL_Q_MIN: f32 = 0.1;
+const PI: f64 = core::f64::consts::PI;
+const TWO_PI: f64 = 2.0 * PI;
+const BYPASS_THRESHOLD: f64 = 0.01;
+const A0_THRESHOLD: f64 = 1e-8;
+const SHELF_Q_MAX: f64 = 2.0;
+const GENERAL_Q_MIN: f64 = 0.1;
 
 pub fn design(
     sample_rate: f32,
@@ -26,6 +31,12 @@ pub fn design(
     if !enabled {
         return (Coeffs::identity(), true);
     }
+
+    // Promote ABI f32 inputs to f64 and compute exactly like the JS path.
+    let sample_rate = sample_rate as f64;
+    let freq = freq as f64;
+    let gain_db = gain_db as f64;
+    let q_in = q_in as f64;
 
     let is_shelf = type_id == FT_LOW_SHELF || type_id == FT_HIGH_SHELF;
     let mut q = q_in;
@@ -46,14 +57,16 @@ pub fn design(
     }
 
     let a = pow10(0.025 * gain_db); // 10^(gain/40) = sqrt(10^(gain/20))
-    let w0 = freq * TWO_PI / sample_rate;
+    // Match JS exactly: w0 = freq * (2*PI / sampleRate)  (twoPiTimesSrInv).
+    let w0 = freq * (TWO_PI / sample_rate);
     let w0c = clamp(w0, 1e-6, PI - 1e-6);
     let cos_w0 = cosf(w0c);
     let sin_w0 = sinf(w0c);
     let alpha = sin_w0 / (2.0 * q);
 
     #[allow(unused_assignments)]
-    let (mut b0, mut b1, mut b2, mut a0, mut a1, mut a2) = (0.0f32, 0.0f32, 0.0f32, 1.0f32, 0.0f32, 0.0f32);
+    let (mut b0, mut b1, mut b2, mut a0, mut a1, mut a2) =
+        (0.0f64, 0.0f64, 0.0f64, 1.0f64, 0.0f64, 0.0f64);
 
     match type_id {
         x if x == FT_PEAKING => {
@@ -163,28 +176,39 @@ pub fn design(
 }
 
 #[inline]
-fn clamp(x: f32, lo: f32, hi: f32) -> f32 {
-    if x < lo { lo } else if x > hi { hi } else { x }
+fn clamp(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo {
+        lo
+    } else if x > hi {
+        hi
+    } else {
+        x
+    }
 }
 
-// Math intrinsics (libm-free f32 implementations).
+// Math intrinsics (f64, matching JS Math.*).
 
 #[inline]
-fn pow10(x: f32) -> f32 {
-    (x * core::f32::consts::LN_10).exp()
+fn pow10(x: f64) -> f64 {
+    // Mirror JS `Math.pow(10, x)` rather than exp(x*ln10) for exact parity.
+    10.0_f64.powf(x)
 }
 
 #[inline]
-fn sinf(x: f32) -> f32 {
+fn sinf(x: f64) -> f64 {
     x.sin()
 }
 
 #[inline]
-fn cosf(x: f32) -> f32 {
+fn cosf(x: f64) -> f64 {
     x.cos()
 }
 
 #[inline]
-fn sqrtf(x: f32) -> f32 {
-    if x <= 0.0 { 0.0 } else { x.sqrt() }
+fn sqrtf(x: f64) -> f64 {
+    if x <= 0.0 {
+        0.0
+    } else {
+        x.sqrt()
+    }
 }

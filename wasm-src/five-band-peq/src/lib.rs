@@ -7,21 +7,12 @@
 //! IIR filters are inherently serial, so this port focuses on removing JS overhead
 //! and uses WASM SIMD only to process two channels of a single biquad in parallel.
 
-mod biquad;
-mod design;
+use peq_dsp::biquad;
+use peq_dsp::design;
+use peq_dsp::FT_PEAKING;
 
 const NUM_BANDS: usize = 5;
 const MAX_CHANNELS: usize = 8;
-
-// Filter type IDs — must match JS numeric mapping in the plugin glue.
-pub const FT_PEAKING: u32 = 0;
-pub const FT_LOWPASS: u32 = 1;
-pub const FT_HIGHPASS: u32 = 2;
-pub const FT_LOW_SHELF: u32 = 3;
-pub const FT_HIGH_SHELF: u32 = 4;
-pub const FT_BANDPASS: u32 = 5;
-pub const FT_NOTCH: u32 = 6;
-pub const FT_ALLPASS: u32 = 7;
 
 #[derive(Clone, Copy)]
 struct BandConfig {
@@ -143,13 +134,13 @@ fn process_scalar(s: &mut State, bs: usize, ch_count: usize) {
             let (mut y1, mut y2) = (st.y1, st.y2);
             let slice = &mut s.io[offset..offset + bs];
             for sample in slice.iter_mut() {
-                let x = *sample;
+                let x = *sample as f64;
                 let y = c.b0 * x + c.b1 * x1 + c.b2 * x2 - c.a1 * y1 - c.a2 * y2;
                 x2 = x1;
                 x1 = x;
                 y2 = y1;
                 y1 = y;
-                *sample = y;
+                *sample = y as f32;
             }
             st.x1 = x1;
             st.x2 = x2;
@@ -171,37 +162,39 @@ fn process_stereo_simd(s: &mut State, bs: usize) {
             continue;
         }
         let c = &cfg.coeffs;
-        let b0 = f32x4_splat(c.b0);
-        let b1 = f32x4_splat(c.b1);
-        let b2 = f32x4_splat(c.b2);
-        let a1 = f32x4_splat(c.a1);
-        let a2 = f32x4_splat(c.a2);
+        // f64x2: lane 0 = L, lane 1 = R. The old f32x4 path only used 2 of 4
+        // lanes anyway, so f64x2 keeps the same SIMD width while matching the
+        // JS reference's f64 recursion exactly.
+        let b0 = f64x2_splat(c.b0);
+        let b1 = f64x2_splat(c.b1);
+        let b2 = f64x2_splat(c.b2);
+        let a1 = f64x2_splat(c.a1);
+        let a2 = f64x2_splat(c.a2);
 
         let st_l = &s.states[band][0];
         let st_r = &s.states[band][1];
-        // Pack as [L, R, _, _]; only the first two lanes matter.
-        let mut x1 = f32x4(st_l.x1, st_r.x1, 0.0, 0.0);
-        let mut x2 = f32x4(st_l.x2, st_r.x2, 0.0, 0.0);
-        let mut y1 = f32x4(st_l.y1, st_r.y1, 0.0, 0.0);
-        let mut y2 = f32x4(st_l.y2, st_r.y2, 0.0, 0.0);
+        let mut x1 = f64x2(st_l.x1, st_r.x1);
+        let mut x2 = f64x2(st_l.x2, st_r.x2);
+        let mut y1 = f64x2(st_l.y1, st_r.y1);
+        let mut y2 = f64x2(st_l.y2, st_r.y2);
 
         // SAFETY: indices stay in bounds because bs ≤ max_block_size and
         // io is sized for max_block_size * MAX_CHANNELS.
         let io = &mut s.io[..];
         for i in 0..bs {
-            let xl = io[left_off + i];
-            let xr = io[right_off + i];
-            let x = f32x4(xl, xr, 0.0, 0.0);
+            let xl = io[left_off + i] as f64;
+            let xr = io[right_off + i] as f64;
+            let x = f64x2(xl, xr);
 
             // y = b0*x + b1*x1 + b2*x2 - a1*y1 - a2*y2
-            let mut y = f32x4_mul(b0, x);
-            y = f32x4_add(y, f32x4_mul(b1, x1));
-            y = f32x4_add(y, f32x4_mul(b2, x2));
-            y = f32x4_sub(y, f32x4_mul(a1, y1));
-            y = f32x4_sub(y, f32x4_mul(a2, y2));
+            let mut y = f64x2_mul(b0, x);
+            y = f64x2_add(y, f64x2_mul(b1, x1));
+            y = f64x2_add(y, f64x2_mul(b2, x2));
+            y = f64x2_sub(y, f64x2_mul(a1, y1));
+            y = f64x2_sub(y, f64x2_mul(a2, y2));
 
-            io[left_off + i] = f32x4_extract_lane::<0>(y);
-            io[right_off + i] = f32x4_extract_lane::<1>(y);
+            io[left_off + i] = f64x2_extract_lane::<0>(y) as f32;
+            io[right_off + i] = f64x2_extract_lane::<1>(y) as f32;
 
             x2 = x1;
             x1 = x;
@@ -210,14 +203,14 @@ fn process_stereo_simd(s: &mut State, bs: usize) {
         }
 
         let st = &mut s.states[band];
-        st[0].x1 = f32x4_extract_lane::<0>(x1);
-        st[0].x2 = f32x4_extract_lane::<0>(x2);
-        st[0].y1 = f32x4_extract_lane::<0>(y1);
-        st[0].y2 = f32x4_extract_lane::<0>(y2);
-        st[1].x1 = f32x4_extract_lane::<1>(x1);
-        st[1].x2 = f32x4_extract_lane::<1>(x2);
-        st[1].y1 = f32x4_extract_lane::<1>(y1);
-        st[1].y2 = f32x4_extract_lane::<1>(y2);
+        st[0].x1 = f64x2_extract_lane::<0>(x1);
+        st[0].x2 = f64x2_extract_lane::<0>(x2);
+        st[0].y1 = f64x2_extract_lane::<0>(y1);
+        st[0].y2 = f64x2_extract_lane::<0>(y2);
+        st[1].x1 = f64x2_extract_lane::<1>(x1);
+        st[1].x2 = f64x2_extract_lane::<1>(x2);
+        st[1].y1 = f64x2_extract_lane::<1>(y1);
+        st[1].y2 = f64x2_extract_lane::<1>(y2);
     }
 }
 

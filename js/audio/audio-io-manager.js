@@ -246,7 +246,11 @@ export class AudioIOManager {
                 delete audioConstraints.deviceId;
                 try {
                     const stream = await this._getUserMediaWithTimeout({ audio: audioConstraints });
-                    return { stream, error: null };
+                    // The saved/preferred device failed and we silently bound to
+                    // the system default instead. Signal it so reconnection
+                    // callers can warn the user that input may not be the
+                    // device they expect.
+                    return { stream, error: null, usedFallback: true };
                 } catch (innerError) {
                     return { stream: null, error: innerError };
                 }
@@ -760,6 +764,20 @@ export class AudioIOManager {
      * @param {string|null} preferredDeviceId - saved input device id, or null for default
      * @returns {Promise<boolean>} true if a live mic source was reconnected
      */
+    // Surface a non-fatal notice when mic acquisition silently fell back to
+    // the system default (the preferred/saved device was unavailable on
+    // replug, so input may not be the device the user expects).
+    _warnIfMicFallback(usedFallback) {
+        if (!usedFallback) return;
+        try {
+            if (typeof window !== 'undefined' && window.uiManager?.setError) {
+                window.uiManager.setError(
+                    'Preferred microphone unavailable — using the system default input device.',
+                    false);
+            }
+        } catch (_) { /* notice is best-effort, never break recovery */ }
+    }
+
     async reapplyInputDevice(preferredDeviceId) {
         hdmiDebug('REAPPLY-IN', `start preferredDeviceId=${preferredDeviceId ?? 'default'}`);
 
@@ -774,7 +792,8 @@ export class AudioIOManager {
         const playerOwnsSource = !!playerCtxMgr?.originalSourceNode;
         if (playerOwnsSource && !useInputWithPlayer) {
             const oldStream = this.stream;
-            const { stream } = await this._acquireMicStream(preferredDeviceId);
+            const oldOriginalNode = playerCtxMgr.originalSourceNode;
+            const { stream, usedFallback } = await this._acquireMicStream(preferredDeviceId);
             if (!stream) {
                 hdmiDebug('REAPPLY-IN', 'player-owned: acquire failed → false');
                 return false;
@@ -787,7 +806,12 @@ export class AudioIOManager {
                 return false;
             }
             this.stream = stream;
+            // Defensive: the old node was disconnected when the player took
+            // over, but disconnect() again so a lingering edge cannot survive
+            // the swap (symmetric with the non-player branch below).
+            try { oldOriginalNode?.disconnect(); } catch (_) { /* ignore */ }
             try { oldStream?.getTracks().forEach(t => t.stop()); } catch (_) { /* ignore */ }
+            this._warnIfMicFallback(usedFallback);
             hdmiDebug('REAPPLY-IN', 'player-owned: updated originalSourceNode (not wired to worklet)');
             return true;
         }
@@ -795,11 +819,12 @@ export class AudioIOManager {
         const oldStream = this.stream;
         const oldSource = this.sourceNode;
 
-        const { stream, error } = await this._acquireMicStream(preferredDeviceId);
+        const { stream, error, usedFallback } = await this._acquireMicStream(preferredDeviceId);
         if (!stream) {
             hdmiDebug('REAPPLY-IN', `acquire failed (${error?.name ?? 'unknown'}) → false`);
             return false;
         }
+        this._warnIfMicFallback(usedFallback);
 
         // Stop the old (dead) tracks and detach the old source.  This also
         // correctly handles the silent-gain fallback case: oldStream is null and

@@ -772,8 +772,16 @@ class App {
         // Handle audio device changes (e.g., USB device reconnected)
         if (navigator.mediaDevices && typeof navigator.mediaDevices.addEventListener === 'function') {
             navigator.mediaDevices.addEventListener('devicechange', () => {
-                this.handleOutputDeviceChange();
-                this.handleInputDeviceChange();
+                // Run input recovery AFTER output recovery, never concurrently.
+                // A single event from a combined USB audio interface (input +
+                // output) would otherwise fire both handlers in parallel; with
+                // separate in-progress guards they could each reach
+                // audioManager.reset() and queue two back-to-back full
+                // teardown/rebuild cycles (extended dropout).
+                Promise.resolve()
+                    .then(() => this.handleOutputDeviceChange())
+                    .catch(() => { /* handled inside */ })
+                    .finally(() => this.handleInputDeviceChange());
             });
         }
     }
@@ -945,6 +953,10 @@ class App {
                     (d.deviceId === prefs.outputDeviceId ||
                      (prefs.outputDeviceLabel && d.label === prefs.outputDeviceLabel)));
                 if (!stillAbsent) return;
+                if (this.audioManager._resetInProgress) {
+                    hdmiDebug('disconnectDebounce', 'reset already in progress — skip');
+                    return;
+                }
                 // Confirmed long disconnect: reset to fallback.
                 // Save pipeline state first so a watchdog-triggered force-relaunch
                 // (if reset() somehow hangs despite our timeouts) still preserves
@@ -1090,9 +1102,16 @@ class App {
             `wasAbsent=${wasAbsent} preferredDeviceId=${preferredDeviceId ?? 'default'}`);
 
         if (!present) {
-            // Mic absent — non-fatal (input goes silent).  Record and wait for
-            // the replug devicechange; reapplyInputDevice handles the dead/silent
-            // source on the way back.
+            // Mic absent — non-fatal (input goes silent).  Surface a one-shot
+            // notice on the absent transition so the user understands why input
+            // went silent (it was previously failing silently with no UI hint),
+            // then wait for the replug devicechange; reapplyInputDevice handles
+            // the dead/silent source on the way back.
+            if (!wasAbsent && this.uiManager?.setError) {
+                this.uiManager.setError(
+                    'Microphone disconnected — audio input is silent until it is reconnected.',
+                    false);
+            }
             return;
         }
 
@@ -1137,11 +1156,32 @@ class App {
             }
             this._lastInputRecoveryTime = now;
 
+            // A full reset already running (e.g. concurrent output recovery):
+            // skip the light reapply. The in-flight reset rebuilds the graph
+            // with the saved input; a stale reapply here would race its
+            // teardown (it nulls the worklet / closes the context).
+            if (this.audioManager._resetInProgress) {
+                hdmiDebug('IN-HANDLER', 'reset already in progress — skip light reapply');
+                return;
+            }
+
+            // Re-resolve the target device id from the POST-debounce
+            // enumeration: a USB id can change again across the oscillation
+            // window, so the 3 s-old preferredDeviceId may now be stale.
+            let freshPreferredId;
+            if (prefs.inputDeviceId) {
+                const f = inputs2.find(d => d.deviceId === prefs.inputDeviceId)
+                    || (prefs.inputDeviceLabel ? inputs2.find(d => d.label === prefs.inputDeviceLabel) : null);
+                freshPreferredId = f?.deviceId ?? prefs.inputDeviceId;
+            } else {
+                freshPreferredId = null;
+            }
+
             // Persist pipeline state first so a watchdog-triggered force-relaunch
             // (if the fallback reset somehow hangs) still preserves user config.
             await this._savePipelineStateBeforeRisk();
 
-            const ok = await this.audioManager.ioManager.reapplyInputDevice(preferredDeviceId);
+            const ok = await this.audioManager.ioManager.reapplyInputDevice(freshPreferredId);
             if (ok) {
                 // Refresh the audioManager.sourceNode / window mirror so the rest
                 // of the app sees the new source node.

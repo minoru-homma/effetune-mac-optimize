@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[dependencies]
+peq_dsp = { path = "../peq-dsp" }
+
 [lib]
 crate-type = ["cdylib"]
 

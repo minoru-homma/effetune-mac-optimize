@@ -51,10 +51,21 @@ pub struct FilterBank {
     hp_coeffs: [LRSection; NUM_CROSSOVERS],
     lp_state: [[LRStateChannel; 8]; NUM_CROSSOVERS],
     hp_state: [[LRStateChannel; 8]; NUM_CROSSOVERS],
+    // Owned crossover scratch, sized to the host's max block size. Replaces
+    // the previous fixed `[0.0f32; 1024]` stack buffers whose only bound was a
+    // `debug_assert!` (compiled out in release → a WASM trap if the block ever
+    // exceeded 1024). Heap-allocated once; no per-call allocation.
+    hp1: Vec<f32>,
+    hp2: Vec<f32>,
 }
 
 impl FilterBank {
-    pub fn new(sample_rate: f32, frequencies: &[f32; NUM_CROSSOVERS], _channel_count: usize) -> Self {
+    pub fn new(
+        sample_rate: f32,
+        frequencies: &[f32; NUM_CROSSOVERS],
+        _channel_count: usize,
+        max_block_size: usize,
+    ) -> Self {
         let mut lp_coeffs = [LRSection::default(); NUM_CROSSOVERS];
         let mut hp_coeffs = [LRSection::default(); NUM_CROSSOVERS];
 
@@ -64,11 +75,14 @@ impl FilterBank {
             hp_coeffs[i] = design_lr4(sample_rate, f, false);
         }
 
+        let cap = max_block_size.max(1);
         FilterBank {
             lp_coeffs,
             hp_coeffs,
             lp_state: [[LRStateChannel::default(); 8]; NUM_CROSSOVERS],
             hp_state: [[LRStateChannel::default(); 8]; NUM_CROSSOVERS],
+            hp1: vec![0.0; cap],
+            hp2: vec![0.0; cap],
         }
     }
 
@@ -80,40 +94,43 @@ impl FilterBank {
         block_size: usize,
     ) {
         // band_buffers layout: 5 bands * block_size, contiguous per band.
-        // Use stack-allocated temp buffers (max block size 1024 supported here).
-        let mut hp1 = [0.0f32; 1024];
-        let mut hp2 = [0.0f32; 1024];
-        debug_assert!(block_size <= 1024);
+        // Crossover scratch is the owned hp1/hp2 (sized to max_block_size in
+        // new()). Defensive bound: the caller (process_block) already rejects
+        // block_size > max_block_size, so this never trips in practice; it
+        // turns any future contract violation into a no-op instead of a trap.
         let bs = block_size;
+        if bs == 0 || bs > self.hp1.len() || bs > self.hp2.len() {
+            return;
+        }
 
         // Band 0: input -> LP[0]
         let band0 = &mut band_buffers[0..bs];
         apply_lr(&self.lp_coeffs[0], &mut self.lp_state[0][ch], input, band0, bs);
 
         // hp1 = HP[0](input)
-        apply_lr(&self.hp_coeffs[0], &mut self.hp_state[0][ch], input, &mut hp1[..bs], bs);
+        apply_lr(&self.hp_coeffs[0], &mut self.hp_state[0][ch], input, &mut self.hp1[..bs], bs);
 
         // Band 1: hp1 -> LP[1]
         let band1 = &mut band_buffers[bs..2 * bs];
-        apply_lr(&self.lp_coeffs[1], &mut self.lp_state[1][ch], &hp1[..bs], band1, bs);
+        apply_lr(&self.lp_coeffs[1], &mut self.lp_state[1][ch], &self.hp1[..bs], band1, bs);
 
         // hp2 = HP[1](hp1)
-        apply_lr(&self.hp_coeffs[1], &mut self.hp_state[1][ch], &hp1[..bs], &mut hp2[..bs], bs);
+        apply_lr(&self.hp_coeffs[1], &mut self.hp_state[1][ch], &self.hp1[..bs], &mut self.hp2[..bs], bs);
 
         // Band 2: hp2 -> LP[2]
         let band2 = &mut band_buffers[2 * bs..3 * bs];
-        apply_lr(&self.lp_coeffs[2], &mut self.lp_state[2][ch], &hp2[..bs], band2, bs);
+        apply_lr(&self.lp_coeffs[2], &mut self.lp_state[2][ch], &self.hp2[..bs], band2, bs);
 
         // hp1 reused = HP[2](hp2)
-        apply_lr(&self.hp_coeffs[2], &mut self.hp_state[2][ch], &hp2[..bs], &mut hp1[..bs], bs);
+        apply_lr(&self.hp_coeffs[2], &mut self.hp_state[2][ch], &self.hp2[..bs], &mut self.hp1[..bs], bs);
 
         // Band 3: hp1 -> LP[3]
         let band3 = &mut band_buffers[3 * bs..4 * bs];
-        apply_lr(&self.lp_coeffs[3], &mut self.lp_state[3][ch], &hp1[..bs], band3, bs);
+        apply_lr(&self.lp_coeffs[3], &mut self.lp_state[3][ch], &self.hp1[..bs], band3, bs);
 
         // Band 4: hp1 -> HP[3]
         let band4 = &mut band_buffers[4 * bs..5 * bs];
-        apply_lr(&self.hp_coeffs[3], &mut self.hp_state[3][ch], &hp1[..bs], band4, bs);
+        apply_lr(&self.hp_coeffs[3], &mut self.hp_state[3][ch], &self.hp1[..bs], band4, bs);
     }
 }
 

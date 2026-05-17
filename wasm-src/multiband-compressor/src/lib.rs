@@ -77,7 +77,7 @@ pub extern "C" fn init(
         channel_count: ch as u32,
         max_block_size,
         crossover_freqs: freqs,
-        filter: filter::FilterBank::new(sample_rate, &freqs, ch),
+        filter: filter::FilterBank::new(sample_rate, &freqs, ch, bs),
         envelopes: [MIN_ENV_VAL; NUM_BANDS * MAX_CHANNELS],
         band_params: [BandParams::default(); NUM_BANDS],
         time_constants: [0.0; NUM_BANDS * 2],
@@ -148,7 +148,12 @@ pub extern "C" fn set_crossover_freqs(
     let new_freqs = [f1, f2, f3, f4];
     if new_freqs != s.crossover_freqs {
         s.crossover_freqs = new_freqs;
-        s.filter = filter::FilterBank::new(s.sample_rate, &new_freqs, s.channel_count as usize);
+        s.filter = filter::FilterBank::new(
+            s.sample_rate,
+            &new_freqs,
+            s.channel_count as usize,
+            s.max_block_size as usize,
+        );
         s.envelopes = [MIN_ENV_VAL; NUM_BANDS * MAX_CHANNELS];
         s.fade_in.counter = 0;
     }

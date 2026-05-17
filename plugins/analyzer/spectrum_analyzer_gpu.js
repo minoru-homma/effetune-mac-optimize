@@ -227,6 +227,32 @@ class SpectrumAnalyzerGpuRenderer {
             && typeof HTMLCanvasElement !== 'undefined';
     }
 
+    static _describeAdapter(adapter) {
+        const i = (adapter && adapter.info) ? adapter.info : {};
+        const parts = [i.vendor, i.architecture, i.device, i.description].filter(Boolean);
+        return (parts.join(' / ') || 'no adapter info')
+            + (adapter && adapter.isFallbackAdapter ? ' [fallback]' : '');
+    }
+
+    // A software/fallback WebGPU adapter (SwiftShader, llvmpipe, Microsoft
+    // Basic Render, …) is the root cause of the "all-black" bug: its device is
+    // recycled roughly once a second, so init succeeds but the canvas is then
+    // permanently lost. Refuse it so the plugin uses the (always-working)
+    // dedicated Canvas 2D fallback instead of looping on device loss.
+    static _isSoftwareAdapter(adapter) {
+        if (!adapter) return true;
+        if (adapter.isFallbackAdapter === true) return true;
+        const i = adapter.info || {};
+        const hay = [i.vendor, i.architecture, i.device, i.description]
+            .filter(Boolean).join(' ').toLowerCase();
+        if (!hay) return false; // no info exposed — don't over-reject a real GPU
+        if (/swiftshader|llvmpipe|lavapipe|softpipe|basic render|microsoft basic|warp/.test(hay)) {
+            return true;
+        }
+        // SwiftShader frequently reports vendor "google" with a software arch.
+        return /\bgoogle\b/.test(hay) && /swiftshader|software/.test(hay);
+    }
+
     constructor(canvas) {
         this.canvas = canvas;
         this.adapter = null; // retained so the device is not GC-lost ("destroyed")
@@ -319,6 +345,14 @@ class SpectrumAnalyzerGpuRenderer {
 
     async _continueInit(adapter) {
         try {
+            if (SpectrumAnalyzerGpuRenderer._isSoftwareAdapter(adapter)) {
+                this._logWarn('software/fallback adapter rejected ('
+                    + SpectrumAnalyzerGpuRenderer._describeAdapter(adapter)
+                    + ') — using Canvas 2D to avoid the SwiftShader device-loss loop');
+                this.device = null;
+                this.context = null;
+                return false;
+            }
             this._logInfo('init step 2: requesting device (vendor=' + (adapter.info && adapter.info.vendor) + ')');
             const device = await adapter.requestDevice();
             if (!device) {

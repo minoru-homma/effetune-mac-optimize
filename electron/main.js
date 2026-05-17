@@ -123,6 +123,15 @@ ipcMain.on('renderer-log', (_event, payload) => {
     const markerPath = path.join(app.getPath('userData'), '.hdmi-debug-enabled');
     if (fs.existsSync(markerPath)) {
       const logPath = path.join(app.getPath('userData'), 'effetune-debug.log');
+      // This tee runs for every renderer-log line; bound growth by rotating
+      // once it passes ~5 MB (keep a single .1 backup) so a long diagnostic
+      // session cannot fill the user's disk.
+      try {
+        const st = fs.statSync(logPath);
+        if (st.size > 5 * 1024 * 1024) {
+          try { fs.renameSync(logPath, logPath + '.1'); } catch (_) { /* best effort */ }
+        }
+      } catch (_) { /* file may not exist yet */ }
       fs.appendFileSync(logPath, `[${new Date().toISOString()}] [renderer-log] ${level} ${tag} ${text}\n`);
     }
   } catch (_) { /* logging must never break the app */ }
