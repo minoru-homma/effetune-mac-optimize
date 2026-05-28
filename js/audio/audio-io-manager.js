@@ -1056,6 +1056,189 @@ export class AudioIOManager {
     }
 
     /**
+     * Start periodic polling to verify audio output device is active.
+     * Fallback for macOS where HDMI reconnection may not trigger devicechange.
+     * @param {Function} getPrefs - async function returning saved preferences
+     * @param {Function} onReset  - async function(prefs) for full reinit
+     */
+    startDevicePoll(getPrefs, onReset, initiallyAbsent = false) {
+        this.stopDevicePoll();
+        this._pollDeviceWasAbsent = initiallyAbsent;
+        this._devicePollIntervalId = setInterval(async () => {
+            if (!window.electronIntegration?.isElectronEnvironment?.()) return;
+            // Skip if a previous poll tick is still running (avoids stacking)
+            if (this._pollRunning) return;
+            this._pollRunning = true;
+            try { await this._pollTick(getPrefs, onReset); } finally { this._pollRunning = false; }
+        }, 4000);
+    }
+
+    async _pollTick(getPrefs, onReset) {
+        // On macOS, skip the poll's recovery actions during the 10 s startup grace
+        // (was 30 s — kept in sync with App._doMacosRelaunch's grace window).
+        if (window.electronAPI?.platform === 'darwin' && window.app?._appStartTime) {
+            const elapsed = Date.now() - window.app._appStartTime;
+            if (elapsed < 10000) {
+                return;
+            }
+        }
+
+        let prefs;
+        try { prefs = await getPrefs(); } catch (e) {
+            console.warn('[_pollTick] Failed to load audio preferences:', e.message);
+            return;
+        }
+        if (!prefs || !prefs.outputDeviceId) return;
+
+        let devices;
+        try { devices = await navigator.mediaDevices.enumerateDevices(); } catch (e) {
+            console.warn('[_pollTick] Failed to enumerate devices:', e.message);
+            return;
+        }
+
+        const outputs = devices.filter(d => d.kind === 'audiooutput');
+
+        // Try exact ID match first; fall back to label match (HDMI may get new ID on reconnect)
+        let foundDevice = outputs.find(d => d.deviceId === prefs.outputDeviceId);
+        let foundByLabel = false;
+        if (!foundDevice && prefs.outputDeviceLabel) {
+            foundDevice = outputs.find(d => d.label === prefs.outputDeviceLabel);
+            foundByLabel = !!foundDevice;
+        }
+
+        const wasAbsent = this._pollDeviceWasAbsent;
+        this._pollDeviceWasAbsent = !foundDevice;
+
+        // Current sinkId: use AudioContext or audioElement depending on mode
+        const ctx = this.contextManager?.audioContext;
+        const el = this.audioContextSinkMode ? null : this.audioElement;
+        const currentSinkId = this.audioContextSinkMode
+            ? (ctx?.sinkId ?? 'no-ctx')
+            : (el?.sinkId ?? 'no-element');
+
+        if (!foundDevice) return;
+        if (!this.audioContextSinkMode && !el) return;
+
+        const activeDeviceId = foundDevice.deviceId;
+        const updatedPrefs = foundByLabel ? { ...prefs, outputDeviceId: activeDeviceId } : prefs;
+
+
+        // Stuck non-'running' AudioContext check.
+        // Even when sinkId already matches and the device is present, the underlying
+        // CoreAudio renderer can stay in a 'suspended' state after macOS HDMI flux
+        // (the user perceives this as audio is dead but UI is alive — the original
+        // freeze report).  Recovery: try a quick resume; if it does not bring the
+        // ctx back to 'running', defer to onReset (= _doMacosRelaunch on macOS).
+        if (this.audioContextSinkMode && ctx && ctx.state !== 'running' && ctx.state !== 'closed') {
+            try {
+                await Promise.race([
+                    ctx.resume(),
+                    new Promise(resolve => setTimeout(resolve, 3000))
+                ]);
+            } catch (e) {
+            }
+            if (ctx.state !== 'running') {
+                try {
+                    await onReset(updatedPrefs);
+                } catch (e) {
+                }
+                return;
+            }
+            return;
+        }
+
+        if (currentSinkId !== activeDeviceId || foundByLabel) {
+            // sinkId mismatch or device got a new ID — full reset needed
+            if (wasAbsent || foundByLabel) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+            try {
+                await onReset(updatedPrefs);
+            } catch (e) {
+                console.error('[_pollTick] onReset failed (sinkId mismatch path):', e.message ?? e);
+            }
+        } else if (wasAbsent) {
+            // sinkId is already correct after reconnect.
+            // If the context is already running, the devicechange handler handled
+            // the reconnect — don't interfere with another toggle.
+            if (this.audioContextSinkMode && ctx?.state === 'running') return;
+
+            // Context is not running — do a light toggle + resume.
+            try {
+                if (this.audioContextSinkMode && ctx) {
+                    await this._setSinkIdWithTimeout(ctx, '');
+                    await new Promise(r => setTimeout(r, 1000));
+                    await this._setSinkIdWithTimeout(ctx, activeDeviceId);
+                    await Promise.race([
+                        ctx.resume(),
+                        new Promise(resolve => setTimeout(resolve, 15000))
+                    ]).catch(() => {});
+                    if (ctx.state === 'running') {
+                        await window.audioManager?.rebuildPipeline(false).catch(() => {});
+                    }
+                } else if (el) {
+                    await this._setSinkIdWithTimeout(el, 'default');
+                    await new Promise(r => setTimeout(r, 300));
+                    await this._setSinkIdWithTimeout(el, activeDeviceId);
+                    if (this.destinationNode?.stream) el.srcObject = this.destinationNode.stream;
+                    await el.play().catch(() => {});
+                }
+            } catch (e) {
+                console.warn('[_pollTick] toggle+resume failed, falling back to full reset:', e.message ?? e);
+                await onReset(updatedPrefs);
+            }
+        } else if (!this.audioContextSinkMode && (el.paused || el.readyState < 2)) {
+            try { await el.play(); } catch (e) {
+                console.warn('[_pollTick] el.play() failed, falling back to full reset:', e.message ?? e);
+                await onReset(prefs);
+            }
+        }
+    }
+
+    _setSinkIdWithTimeout(target, sinkId, ms = 10000) {
+        let timerId;
+        return Promise.race([
+            target.setSinkId(sinkId).finally(() => clearTimeout(timerId)),
+            new Promise((_, reject) => {
+                timerId = setTimeout(
+                    () => reject(new Error(`setSinkId('${sinkId}') timed out after ${ms}ms`)),
+                    ms
+                );
+            })
+        ]);
+    }
+
+    /**
+     * getUserMedia with timeout — on macOS, getUserMedia can hang indefinitely when
+     * the audio system is in flux (HDMI re-re-connect, multi-display).  Apply a 5 s
+     * timeout so the renderer can fall back to silent-source mode and proceed instead
+     * of freezing.
+     */
+    _getUserMediaWithTimeout(constraints, ms = 5000) {
+        let timerId;
+        return Promise.race([
+            navigator.mediaDevices.getUserMedia(constraints).finally(() => clearTimeout(timerId)),
+            new Promise((_, reject) => {
+                timerId = setTimeout(
+                    () => reject(new Error(`getUserMedia timed out after ${ms}ms`)),
+                    ms
+                );
+            })
+        ]);
+    }
+
+    /**
+     * Stop periodic device polling
+     */
+    stopDevicePoll() {
+        if (this._devicePollIntervalId !== null) {
+            clearInterval(this._devicePollIntervalId);
+            this._devicePollIntervalId = null;
+        }
+        this._pollRunning = false;
+    }
+
+    /**
      * Clean up audio input and output
      */
     cleanupAudio() {

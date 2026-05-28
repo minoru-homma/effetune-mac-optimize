@@ -1,6 +1,6 @@
 {
   "name": "effetune",
-  "version": "1.64.0-w1",
+  "version": "1.65.0-w1",
   "description": "Desktop Audio Effect Processor",
   "main": "electron/main.js",
   "scripts": {
@@ -50,9 +50,19 @@
       "buildResources": "build"
     },
     "files": [
-      "**/*",
-      "!dist/**/*",
-      "!node_modules/**/*"
+      "electron/**/*",
+      "js/**/*",
+      "plugins/**/*",
+      "features/**/*",
+      "presets/**/*",
+      "images/**/*",
+      "docs/**/*",
+      "effetune.html",
+      "effetune.css",
+      "manifest.json",
+      "package.json",
+      "LICENSE",
+      "README.md"
     ],
     "fileAssociations": [
       {
