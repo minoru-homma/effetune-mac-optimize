@@ -3,6 +3,7 @@ name: Build Electron App
 on:
   push:
     branches: [ main, master, feature/* ]
+  workflow_dispatch:
 
 # Default permissions are read-only
 permissions: {}
