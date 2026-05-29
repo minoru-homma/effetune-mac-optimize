@@ -19,6 +19,9 @@ public final class CoreAudioEngine {
     public private(set) var sampleRate: Double = 48000
     public private(set) var channels: Int = 2
     public private(set) var bufferFrames: UInt32 = 128
+    /// Largest block a callback may pass to the chain — effects MUST be inited
+    /// with at least this max_block_size or process_block bails out (no DSP).
+    public var maxBlock: Int { maxFrames }
     private var inputUID: String?
     private var outputUID: String?
     private var inputChannels = 2   // actual capture channels (e.g. 1 for a mono USB mic)

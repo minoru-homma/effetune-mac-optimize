@@ -97,13 +97,17 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
     /// Keeps ALL supported effects (disabled ones bypassed) so positions stay
     /// aligned with the JS pipeline for the in-place updateParams path.
     private func rebuildChain(_ descs: [[String: Any]]) {
-        let chain = EffectChain(channels: channels, maxBlock: Int(engine.bufferFrames))
+        // Effects must be inited with the engine's MAX block; a callback can pass
+        // more than bufferFrames (esp. after sample-rate conversion) and Rust
+        // process_block silently no-ops when block_size > max_block_size.
+        let maxBlock = engine.maxBlock
+        let chain = EffectChain(channels: channels, maxBlock: maxBlock)
         for desc in descs {
             guard let typeId = desc["type"] as? String,
                   let kind = EffectKind.find(typeId),
                   let m = EffectModule(kind: kind, dspDir: dspDir,
                                        sampleRate: engine.sampleRate, channels: channels,
-                                       maxBlock: Int(engine.bufferFrames))
+                                       maxBlock: maxBlock)
             else { continue }
             m.enabled = (desc["enabled"] as? Bool) ?? true
             apply(desc, to: m)
