@@ -39,14 +39,20 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
         case "setPipeline":
             if let dir = dict["dspDir"] as? String { dspDir = dir }
             if let ch = dict["channels"] as? Int { channels = ch }
+            rebuildChain((dict["effects"] as? [[String: Any]]) ?? [])
+        case "updateParams":
+            // In-place: apply payloads to the existing chain when structure is
+            // unchanged (param drags). Falls back to a rebuild on any mismatch so
+            // effect DSP state (envelopes, filters) survives slider moves.
             let descs = (dict["effects"] as? [[String: Any]]) ?? []
-            rebuildChain(descs)
-        case "setParam":
-            // Cheap path: re-apply payload to the existing module in place.
-            if let idx = dict["index"] as? Int,
-               let desc = dict["effect"] as? [String: Any],
-               let chain = engine.chain, idx >= 0, idx < chain.effects.count {
-                apply(desc, to: chain.effects[idx])
+            guard let chain = engine.chain, descs.count == chain.effects.count else {
+                rebuildChain(descs); break
+            }
+            for (i, desc) in descs.enumerated() {
+                let m = chain.effects[i]
+                guard (desc["type"] as? String) == m.kind.id else { rebuildChain(descs); return }
+                m.enabled = (desc["enabled"] as? Bool) ?? true
+                apply(desc, to: m)
             }
         default:
             break
@@ -54,16 +60,18 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
     }
 
     /// Build a fresh chain off the audio thread, then hand it to the engine.
+    /// Keeps ALL supported effects (disabled ones bypassed) so positions stay
+    /// aligned with the JS pipeline for the in-place updateParams path.
     private func rebuildChain(_ descs: [[String: Any]]) {
         let chain = EffectChain(channels: channels, maxBlock: Int(engine.bufferFrames))
         for desc in descs {
-            guard (desc["enabled"] as? Bool) ?? true else { continue }
             guard let typeId = desc["type"] as? String,
                   let kind = EffectKind.find(typeId),
                   let m = EffectModule(kind: kind, dspDir: dspDir,
                                        sampleRate: engine.sampleRate, channels: channels,
                                        maxBlock: Int(engine.bufferFrames))
             else { continue }
+            m.enabled = (desc["enabled"] as? Bool) ?? true
             apply(desc, to: m)
             chain.append(m)
         }

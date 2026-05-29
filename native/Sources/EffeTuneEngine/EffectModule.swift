@@ -44,6 +44,9 @@ private typealias FnProcess       = @convention(c) (OpaquePointer?, UInt32) -> V
 /// …) in separate namespaces — no Rust source change needed.
 public final class EffectModule {
     public let kind: EffectKind
+    /// When false the chain passes audio through untouched (kept in the array so
+    /// positions stay aligned with the JS pipeline for in-place param updates).
+    public var enabled = true
     private let handle: UnsafeMutableRawPointer
     private var state: OpaquePointer?
 

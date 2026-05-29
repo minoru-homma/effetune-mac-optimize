@@ -3,6 +3,15 @@ import { CollapseManager } from './plugin-list/collapse-manager.js';
 import { DragDropManager } from './plugin-list/drag-drop-manager.js';
 import { PresetManager } from './plugin-list/preset-manager.js';
 
+// The native macOS host implements only the 8 Rust DSP effects (by class name,
+// matching EffectKind.all in native/Sources/EffeTuneEngine/EffectModule.swift).
+// Other effects are hidden from the plugin list when running in that host.
+const NATIVE_SUPPORTED_EFFECTS = new Set([
+    'FifteenBandPEQPlugin', 'FiveBandPEQPlugin', 'TransientShaperPlugin',
+    'SubSynthPlugin', 'AutoLevelerPlugin', 'BrickwallLimiterPlugin',
+    'MultibandCompressorPlugin', 'SpectrumAnalyzerPlugin',
+]);
+
 export class PluginListManager {
     constructor(pluginManager) {
         this.pluginManager = pluginManager;
@@ -117,17 +126,23 @@ export class PluginListManager {
             }
 
             // Add plugins for this category
+            let addedInCategory = 0;
             plugins.forEach(name => {
                 if (this.pluginManager.pluginClasses[name]) {
                     const plugin = new this.pluginManager.pluginClasses[name]();
+                    // Native host supports only the 8 Rust DSP effects; hide the rest.
+                    if (window.__effetuneNativeHost && !NATIVE_SUPPORTED_EFFECTS.has(plugin.constructor.name)) {
+                        return;
+                    }
                     const item = this.createPluginItem(plugin);
                     pluginItemsContainer.appendChild(item);
+                    addedInCategory++;
                 }
             });
-            
+
             // Add row to container
             contentContainer.appendChild(categoryRow);
-            totalEffects += plugins.length;
+            totalEffects += addedInCategory;
         }
 
         // Find existing content container and remove it if it exists

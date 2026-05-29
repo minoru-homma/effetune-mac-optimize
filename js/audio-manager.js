@@ -5,6 +5,7 @@ import { OfflineProcessor } from './audio/offline-processor.js';
 import { AudioEncoder } from './audio/audio-encoder.js';
 import { EventManager } from './audio/event-manager.js';
 import { getSerializablePluginStateShort, applySerializedState } from './utils/serialization-utils.js';
+import { isNativeHost, nativeBridge } from './native-bridge.js';
 
 /**
  * Diagnostic-log helper for the HDMI recovery path.  No-op in normal use; only
@@ -244,6 +245,14 @@ export class AudioManager {
      * @returns {Promise<string>} - Empty string on success, error message on failure
      */
     async initAudio() {
+        // Native host: audio is processed by the CoreAudio engine + Rust dylibs.
+        // Skip all Web Audio (AudioContext / getUserMedia / output) and start the
+        // native engine, then push the current pipeline.
+        if (isNativeHost) {
+            nativeBridge.start();
+            nativeBridge.setPipeline(this.pipeline);
+            return '';
+        }
         try {
             // Initialize audio context (without AudioWorklet)
             const contextResult = await this.contextManager.initAudioContext();
@@ -285,6 +294,8 @@ export class AudioManager {
      * @returns {Promise<string>} - Empty string on success, error message on failure
      */
     async initializeAudioWorklet() {
+        // Native host has no AudioWorklet; the chain was already pushed in initAudio.
+        if (isNativeHost) return '';
         try {
             // Load AudioWorklet and create worklet node
             const workletResult = await this.contextManager.loadAudioWorklet();
@@ -355,6 +366,12 @@ export class AudioManager {
      * @returns {Promise<string>} - Empty string on success, error message on failure
      */
     async rebuildPipeline(isInitializing = false) {
+        // Native host: rebuild the native chain from the current pipeline.
+        if (isNativeHost) {
+            window.pipeline = this.pipeline;
+            nativeBridge.setPipeline(this.pipeline);
+            return '';
+        }
         // Propagate each Section's ON/OFF state to the inner plugins'
         // _sectionEnabled flag so analyzer redraw loops stay paused inside
         // OFF sections after preset/URL load, paste, undo and A<->B copy.
@@ -509,6 +526,13 @@ export class AudioManager {
      * @returns {Promise<void>}
      */
     setPipeline(pipeline) {
+        // Native host: always resend; native applies in place or rebuilds as needed.
+        if (isNativeHost) {
+            this.pipeline = pipeline;
+            window.pipeline = pipeline;
+            nativeBridge.setPipeline(pipeline);
+            return Promise.resolve();
+        }
         // Check if pipeline structure has changed
         const needsRebuild = this.pipeline.length !== pipeline.length ||
             pipeline.some((plugin, index) =>

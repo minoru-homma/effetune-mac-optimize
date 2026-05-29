@@ -21,6 +21,6 @@ public final class EffectChain {
     /// Process `frames` of planar audio (channel-major, stride = frames) in place
     /// through every effect in order. Allocation-free; safe on the audio thread.
     public func process(_ buf: UnsafeMutablePointer<Float>, frames: Int) {
-        for e in effects { e.process(buf, frames: frames) }
+        for e in effects where e.enabled { e.process(buf, frames: frames) }
     }
 }

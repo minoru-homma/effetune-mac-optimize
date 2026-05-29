@@ -81,17 +81,26 @@ class NativeBridge {
 
   stop() { this.post({ cmd: 'stop' }); }
 
-  // pipeline: array of plugin instances (the current EffeTune chain).
-  setPipeline(pipeline) {
-    const effects = pipeline.map(normalize).filter(Boolean);
-    this.post({ cmd: 'setPipeline', channels: this.channels, dspDir: this.dspDir, effects });
+  // All supported effects (enabled flag carried in each desc; disabled ones are
+  // kept as bypassed slots so JS and native indices stay aligned).
+  effects(pipeline) {
+    return pipeline.map(normalize).filter(Boolean);
   }
 
-  // Update a single effect in place (cheap path for slider drags).
-  setParam(index, plugin) {
-    const effect = normalize(plugin);
-    if (effect) this.post({ cmd: 'setParam', index, effect });
+  // Structural change (add/remove/reorder/preset load): rebuild the native chain.
+  setPipeline(pipeline) {
+    this.post({ cmd: 'setPipeline', channels: this.channels, dspDir: this.dspDir, effects: this.effects(pipeline) });
+  }
+
+  // Parameter change (slider drag): apply in place, preserving DSP state.
+  updateParams(pipeline) {
+    this.post({ cmd: 'updateParams', effects: this.effects(pipeline) });
   }
 }
 
 export const nativeBridge = isNativeHost ? new NativeBridge() : null;
+
+// Expose to non-module code (e.g. plugins/plugin-base.js loaded via <script>).
+if (isNativeHost && typeof window !== 'undefined') {
+  window.nativeBridge = nativeBridge;
+}

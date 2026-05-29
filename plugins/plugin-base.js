@@ -335,6 +335,15 @@ class PluginBase {
 
     // Update plugin parameters via the worklet.
     updateParameters() {
+        // Native host: route the whole pipeline's params to the native engine
+        // (applied in place, preserving DSP state). No Web Audio worklet exists.
+        if (window.__effetuneNativeHost && window.nativeBridge) {
+            if (window.audioManager?.pipeline) {
+                window.nativeBridge.updateParams(window.audioManager.pipeline);
+            }
+            if (window.uiManager) window.uiManager.updateURL();
+            return;
+        }
         if (window.workletNode) {
             const parameters = this.getParameters();
             
