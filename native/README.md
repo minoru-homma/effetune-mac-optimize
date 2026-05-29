@@ -63,12 +63,24 @@ read via per-module getters (`last_gain_db`, `last_input_lufs`,
   `EffectParams` (per-effect marshalling), `EffectChain` (RT-safe ordered
   processing), `CoreAudioEngine` (AUHAL duplex, configurable buffer frames).
 - **dsptest** — headless offline verifier.
+- **EffeTuneApp** — AppKit + WKWebView host; `AudioBridge` decodes JS commands
+  (`start`/`stop`/`setPipeline`/`setParam`) into engine + chain operations.
 
 ```bash
 cd native
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift build
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer ./.build/debug/dsptest "$(pwd)/dsp"
 ```
+
+## Build & run the app
+
+```bash
+native/app/make-app.sh                 # build dylibs + app, assemble EffeTune.app, ad-hoc sign
+# dev run with the UI served from the repo (Web Audio still active until wiring lands):
+EFFETUNE_WEBROOT="$(pwd)" open native/.build/EffeTune.app
+```
+
+`Requires the active Xcode (DEVELOPER_DIR), not just Command Line Tools.`
 
 ## Status
 
@@ -82,10 +94,13 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer ./.build/debug/dsptest 
       transient, sub-synth, auto-leveler, multiband (`EffectParams.swift`).
 - [x] `CoreAudioEngine` AUHAL duplex written (compiles; live audio test pending in
       the app — needs a device + mic permission).
-- [ ] WKWebView host + JS↔Native bridge replacing Electron `electronAPI`
-      (`electron/preload.js`).
-- [ ] Renderer "controller mode": stop driving Web Audio; route pipeline + param
-      changes to native, receive meters back (`js/native-bridge.js`).
+- [x] WKWebView host app (`native/Sources/EffeTuneApp`) + JS↔Native bridge
+      (`AudioBridge.swift`); assembles into a codesigned `EffeTune.app` via
+      `native/app/make-app.sh` (Info.plist + 8 dylibs + binary, codesign valid).
+- [~] Renderer bridge client `js/native-bridge.js`: native-mode detection +
+      per-effect normalizers (transient/limiter/PEQ confirmed; auto-leveler /
+      sub-synth / multiband keys still TODO). NOT yet hooked into `AudioManager`
+      (Web Audio still drives audio until the controller-mode wiring lands).
 - [ ] Presets filtered to the 8 effects (graceful skip of unknown names in
       `js/preset-manager.js`).
 - [ ] E2E: latency (loopback @64/128), live chain audio, RT param updates, preset

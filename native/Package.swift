@@ -21,5 +21,16 @@ let package = Package(
             name: "dsptest",
             dependencies: ["EffeTuneEngine"]
         ),
+        // The macOS app: AppKit window hosting a WKWebView with the EffeTune UI,
+        // bridged to the native CoreAudio engine. Bundled into EffeTune.app by
+        // native/app/make-app.sh.
+        .executableTarget(
+            name: "EffeTuneApp",
+            dependencies: ["EffeTuneEngine"],
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("WebKit"),
+            ]
+        ),
     ]
 )
