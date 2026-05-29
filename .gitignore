@@ -46,3 +46,8 @@ Thumbs.db
 
 # Rust / Cargo build artefacts (WASM source crates)
 wasm-src/**/target/
+
+# Native macOS app build artefacts
+native/dsp/*.dylib
+native/tools/verify_dsp
+native/.build/
