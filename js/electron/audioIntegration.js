@@ -2,6 +2,10 @@
  * Audio integration module for EffeTune
  * Provides audio device functionality when running in Electron
  */
+import { isNativeHost, nativeBridge } from '../native-bridge.js';
+
+// Native host: persist audio preferences in localStorage (no Electron main proc).
+const NATIVE_PREFS_KEY = 'effetune_native_audio_prefs';
 
 /**
  * Load saved audio preferences
@@ -9,8 +13,14 @@
  * @returns {Promise<Object|null>} Audio preferences or null if not available
  */
 export async function loadAudioPreferences(isElectron) {
+  if (isNativeHost) {
+    try {
+      const raw = localStorage.getItem(NATIVE_PREFS_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (_) { return null; }
+  }
   if (!isElectron) return null;
-  
+
   try {
     const result = await window.electronAPI.loadAudioPreferences();
     if (result.success && result.preferences) {
@@ -30,8 +40,14 @@ export async function loadAudioPreferences(isElectron) {
  * @returns {Promise<boolean>} Success status
  */
 export async function saveAudioPreferences(isElectron, preferences) {
+  if (isNativeHost) {
+    try {
+      localStorage.setItem(NATIVE_PREFS_KEY, JSON.stringify(preferences));
+      return true;
+    } catch (_) { return false; }
+  }
   if (!isElectron) return false;
-  
+
   try {
     const result = await window.electronAPI.saveAudioPreferences(preferences);
     return result.success;
@@ -47,8 +63,18 @@ export async function saveAudioPreferences(isElectron, preferences) {
  * @returns {Promise<Array>} List of audio devices
  */
 export async function getAudioDevices(isElectron) {
+  if (isNativeHost) {
+    // Native CoreAudio device list -> UI shape (one entry per capability).
+    const devs = await nativeBridge.listDevices();
+    const out = [];
+    for (const d of devs) {
+      if (d.hasInput)  out.push({ deviceId: d.uid, kind: 'audioinput',  label: d.name });
+      if (d.hasOutput) out.push({ deviceId: d.uid, kind: 'audiooutput', label: d.name });
+    }
+    return out;
+  }
   if (!isElectron) return [];
-  
+
   try {
     // First try to get devices from Electron's main process
     try {
@@ -107,8 +133,8 @@ export async function getAudioDevices(isElectron) {
  * @param {Function} callback - Callback function to be called when devices are selected
  */
 export async function showAudioConfigDialog(isElectron, audioPreferences, callback) {
-  if (!isElectron) return;
-  
+  if (!isElectron && !isNativeHost) return;
+
   try {
     // Show "Configuring audio devices..." message
     if (window.uiManager) {
@@ -357,10 +383,25 @@ export async function showAudioConfigDialog(isElectron, audioPreferences, callba
       
       // Update global audio preferences for AudioWorklet context
       window.audioPreferences = preferences;
-      
+
       // Save and close
       await saveAudioPreferences(isElectron, preferences);
-      
+
+      // Native host: reconfigure the CoreAudio engine with the chosen devices,
+      // re-push the pipeline, and close (no window reload needed).
+      if (isNativeHost) {
+        nativeBridge.setDevices(preferences);
+        if (window.audioManager?.rebuildPipeline) {
+          window.audioManager.rebuildPipeline();
+        }
+        document.body.removeChild(dialogElement);
+        document.head.removeChild(styleElement);
+        document.removeEventListener('keydown', handleKeydown);
+        if (callback) callback(preferences);
+        clearErrorOnClose();
+        return;
+      }
+
       // Update AudioWorklet with the new channel configuration
       if (window.audioManager && window.audioManager.updateAudioConfig) {
         window.audioManager.updateAudioConfig(preferences);

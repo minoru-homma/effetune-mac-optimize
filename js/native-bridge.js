@@ -74,9 +74,33 @@ class NativeBridge {
     if (window.__effetuneNativePost) window.__effetuneNativePost(msg);
   }
 
-  start({ sampleRate = 48000, channels = 2, bufferFrames = 128 } = {}) {
-    this.sampleRate = sampleRate; this.channels = channels; this.bufferFrames = bufferFrames;
-    this.post({ cmd: 'start', sampleRate, channels, bufferFrames });
+  // Map UI audioPreferences -> native device/format payload.
+  _devicePayload(cmd, prefs) {
+    if (prefs) {
+      this.sampleRate = prefs.sampleRate || this.sampleRate;
+      this.channels = prefs.outputChannels || this.channels;
+    }
+    return {
+      cmd,
+      sampleRate: this.sampleRate,
+      channels: this.channels,
+      bufferFrames: this.bufferFrames,
+      inputDeviceId: prefs?.inputDeviceId ?? null,
+      outputDeviceId: prefs?.outputDeviceId ?? null,
+    };
+  }
+
+  start(prefs) { this.post(this._devicePayload('start', prefs)); }
+
+  // Reconfigure devices/format and restart the engine.
+  setDevices(prefs) { this.post(this._devicePayload('setDevices', prefs)); }
+
+  // Async: returns the native CoreAudio device list [{uid,name,hasInput,hasOutput,...}].
+  listDevices() {
+    return new Promise((resolve) => {
+      window.__effetuneOnDevices = (devs) => { resolve(Array.isArray(devs) ? devs : []); };
+      this.post({ cmd: 'listDevices' });
+    });
   }
 
   stop() { this.post({ cmd: 'stop' }); }

@@ -249,7 +249,7 @@ export class AudioManager {
         // Skip all Web Audio (AudioContext / getUserMedia / output) and start the
         // native engine, then push the current pipeline.
         if (isNativeHost) {
-            nativeBridge.start();
+            nativeBridge.start(window.audioPreferences);
             nativeBridge.setPipeline(this.pipeline);
             return '';
         }

@@ -42,6 +42,13 @@ class ElectronIntegration {
       this.loadConfig();
       this.patchDocumentationLinks();
     }
+
+    // Native macOS host: load saved prefs and expose an opener for the audio
+    // config dialog (invoked from the native "Audio > Configure Audio…" menu).
+    if (window.__effetuneNativeHost) {
+      this.loadAudioPreferences();
+      window.__effetuneOpenAudioConfig = () => this.showAudioConfigDialog();
+    }
   }
   
   /**

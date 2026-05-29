@@ -39,6 +39,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
 
         webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
+        bridge.webView = webView
+        setupMenu()
 
         let rect = NSRect(x: 0, y: 0, width: 1280, height: 840)
         window = NSWindow(contentRect: rect,
@@ -61,4 +63,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
+
+    // Minimal native menu: app menu (Quit) + Audio > Configure Audio… which asks
+    // the renderer to open its audio config dialog (device pickers, sample rate).
+    private func setupMenu() {
+        let main = NSMenu()
+
+        let appItem = NSMenuItem()
+        main.addItem(appItem)
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "About EffeTune", action: nil, keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Quit EffeTune", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = appMenu
+
+        let audioItem = NSMenuItem()
+        main.addItem(audioItem)
+        let audioMenu = NSMenu(title: "Audio")
+        let cfg = NSMenuItem(title: "Configure Audio…", action: #selector(openAudioConfig), keyEquivalent: ",")
+        cfg.target = self
+        audioMenu.addItem(cfg)
+        audioItem.submenu = audioMenu
+
+        // Standard Edit menu so copy/paste/text editing work in the web UI.
+        let editItem = NSMenuItem()
+        main.addItem(editItem)
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
+
+        NSApp.mainMenu = main
+    }
+
+    @objc private func openAudioConfig() {
+        webView.evaluateJavaScript("window.__effetuneOpenAudioConfig && window.__effetuneOpenAudioConfig();")
+    }
 }

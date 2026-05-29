@@ -18,6 +18,11 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
     private let engine = CoreAudioEngine()
     private var dspDir: String
     private var channels = 2
+    private var inputUID: String?
+    private var outputUID: String?
+    private var sampleRate: Double = 48000
+    private var bufferFrames = 128
+    public weak var webView: WKWebView?
 
     public init(dspDir: String) {
         self.dspDir = dspDir
@@ -26,14 +31,15 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
     public func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let dict = message.body as? [String: Any], let cmd = dict["cmd"] as? String else { return }
         switch cmd {
+        case "listDevices":
+            sendDeviceList()
         case "start":
-            let sr = (dict["sampleRate"] as? Double) ?? 48000
-            let ch = (dict["channels"] as? Int) ?? 2
-            let bf = UInt32((dict["bufferFrames"] as? Int) ?? 128)
-            channels = ch
-            engine.configure(sampleRate: sr, channels: ch, bufferFrames: bf)
-            do { try engine.start() }
-            catch { FileHandle.standardError.write(Data("engine start failed: \(error)\n".utf8)) }
+            applyDeviceConfig(dict)
+            startEngine()
+        case "setDevices":
+            // Reconfigure devices/format and restart; JS resends the pipeline after.
+            applyDeviceConfig(dict)
+            startEngine()
         case "stop":
             engine.stop()
         case "setPipeline":
@@ -56,6 +62,32 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
             }
         default:
             break
+        }
+    }
+
+    private func applyDeviceConfig(_ dict: [String: Any]) {
+        if let dir = dict["dspDir"] as? String { dspDir = dir }
+        sampleRate = (dict["sampleRate"] as? Double) ?? sampleRate
+        channels = (dict["channels"] as? Int) ?? channels
+        bufferFrames = (dict["bufferFrames"] as? Int) ?? bufferFrames
+        if dict.keys.contains("inputDeviceId")  { inputUID  = dict["inputDeviceId"]  as? String }
+        if dict.keys.contains("outputDeviceId") { outputUID = dict["outputDeviceId"] as? String }
+    }
+
+    private func startEngine() {
+        engine.configure(sampleRate: sampleRate, channels: channels,
+                         bufferFrames: UInt32(bufferFrames), inputUID: inputUID, outputUID: outputUID)
+        do { try engine.start() }
+        catch { FileHandle.standardError.write(Data("engine start failed: \(error)\n".utf8)) }
+    }
+
+    /// Push the CoreAudio device list to the renderer (window.__effetuneOnDevices).
+    private func sendDeviceList() {
+        let devices = AudioDevices.list()
+        guard let data = try? JSONEncoder().encode(devices),
+              let json = String(data: data, encoding: .utf8) else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.webView?.evaluateJavaScript("window.__effetuneOnDevices && window.__effetuneOnDevices(\(json));")
         }
     }
 
