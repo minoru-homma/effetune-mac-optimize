@@ -34,6 +34,10 @@ function normalize(plugin) {
       // Rust set_params order: threshold, release, lookahead, input_gain, margin(sm)
       return { id, type, enabled, payload: { params: [p.th, p.rl, p.la, p.ig, p.sm ?? -1.0] } };
 
+    case 'AutoLevelerPlugin':
+      // Rust set_params: target, window, maxGain, minGain, attack, release, noiseGate
+      return { id, type, enabled, payload: { params: [p.tg, p.tw, p.mg, p.ng, p.at, p.rt, p.gt] } };
+
     case 'FifteenBandPEQPlugin':
     case 'FiveBandPEQPlugin': {
       const bands = [];
@@ -49,12 +53,9 @@ function normalize(plugin) {
       return { id, type, enabled, payload: { bands } };
     }
 
-    // TODO(full-integration): confirm JS param keys against the Rust set_params
-    // arg order for these three, then enable. Until then they pass through
-    // unprocessed on the native host.
-    //   AutoLevelerPlugin       -> [target, window, maxGain, minGain, attack, release, noiseGate]
-    //   SubSynthPlugin          -> [subLvl, dryLvl, subLpfF, subLpfS, subHpfF, subHpfS, dryHpfF, dryHpfS]
-    //   MultibandCompressorPlugin -> crossovers[4] + 5×[threshold,ratio,attack,release,knee,makeup]
+    // TODO(full-integration): SubSynth and Multiband still need their JS param
+    // keys mapped to the Rust set_params/set_band order; until then they are
+    // skipped (not added to the native chain).
     case 'SpectrumAnalyzerPlugin':
       return { id, type, enabled, payload: {} };
 
