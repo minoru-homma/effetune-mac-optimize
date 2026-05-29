@@ -45,6 +45,11 @@ export class AudioIOManager {
         this._pollDeviceWasAbsent = false;
         // Guard against overlapping poll tick executions
         this._pollRunning = false;
+        // Active input track being watched for an involuntary 'ended' (device
+        // disconnect).  track.stop() does NOT fire 'ended', so this only triggers
+        // on real disconnects, not on our own teardown/swaps.
+        this._monitoredInputTrack = null;
+        this._inputTrackEndedHandler = null;
     }
     
     /**
@@ -164,6 +169,8 @@ export class AudioIOManager {
             // If we have microphone access, create source from stream
             if (usingMicrophoneInput && this.stream) {
                 this.sourceNode = this.contextManager.audioContext.createMediaStreamSource(this.stream);
+                // Watch the live track so an involuntary disconnect triggers recovery.
+                this._monitorInputTrack(this.stream);
             } else {
                 // No microphone access, create a stereo-compatible silent source as a fallback
                 console.log('Creating stereo-compatible silent source as fallback');
@@ -257,6 +264,51 @@ export class AudioIOManager {
             }
             return { stream: null, error };
         }
+    }
+
+    /**
+     * Watch a freshly-acquired input stream's audio track for an involuntary
+     * 'ended' event (the reliable, device-agnostic signal that the active input
+     * died on disconnect).  This is what the enumerate-based presence heuristic
+     * in app.js cannot detect for the default device when other inputs remain.
+     *
+     * Per spec, track.stop() does NOT fire 'ended', so this never false-triggers
+     * on our own teardown/swaps — only on a real disconnect.  On fire, it notifies
+     * app.js via a window CustomEvent (mirrors the 'worklet-node-recreated' pattern)
+     * so the existing debounced input-recovery routine re-acquires the device.
+     *
+     * @param {MediaStream|null} stream - the active mic stream (null for the silent fallback)
+     */
+    _monitorInputTrack(stream) {
+        this._unmonitorInputTrack();
+        const track = stream?.getAudioTracks?.()[0];
+        if (!track) return;
+        const handler = () => {
+            // Ignore a stale track that has since been swapped out.
+            if (this._monitoredInputTrack !== track) return;
+            hdmiDebug('IN-TRACK', 'active input track ended (device disconnect)');
+            this._unmonitorInputTrack();
+            try {
+                window.dispatchEvent(new CustomEvent('effetune:input-track-ended'));
+            } catch (_) { /* ignore */ }
+        };
+        this._monitoredInputTrack = track;
+        this._inputTrackEndedHandler = handler;
+        track.addEventListener('ended', handler);
+    }
+
+    /**
+     * Detach the active-input-track 'ended' listener, if any.  Called before a
+     * stream swap and on full teardown so a lingering listener cannot fire after
+     * the track is no longer the active input.
+     */
+    _unmonitorInputTrack() {
+        if (this._monitoredInputTrack && this._inputTrackEndedHandler) {
+            try { this._monitoredInputTrack.removeEventListener('ended', this._inputTrackEndedHandler); }
+            catch (_) { /* ignore */ }
+        }
+        this._monitoredInputTrack = null;
+        this._inputTrackEndedHandler = null;
     }
 
     /**
@@ -811,6 +863,7 @@ export class AudioIOManager {
                 return false;
             }
             this.stream = stream;
+            this._monitorInputTrack(stream);
             // Defensive: the old node was disconnected when the player took
             // over, but disconnect() again so a lingering edge cannot survive
             // the swap (symmetric with the non-player branch below).
@@ -844,6 +897,7 @@ export class AudioIOManager {
 
         try {
             this.stream = stream;
+            this._monitorInputTrack(stream);
             this.sourceNode = this.contextManager.audioContext.createMediaStreamSource(stream);
             // Same connect guard as connectAudioNodes()
             if (window.originalConnectMethod && this.contextManager.isFirstLaunch) {
@@ -1275,6 +1329,9 @@ export class AudioIOManager {
             }
         }
         
+        // Stop watching the active input track before stopping it.
+        this._unmonitorInputTrack();
+
         // Stop all media tracks
         if (this.stream) {
             this.stream.getTracks().forEach(track => track.stop());

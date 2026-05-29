@@ -784,6 +784,12 @@ class App {
                     .finally(() => this.handleInputDeviceChange());
             });
         }
+
+        // Reliable, device-agnostic input recovery trigger: the active input
+        // track ending (device disconnect).  Catches the default-device case on
+        // multi-input systems where the devicechange presence heuristic above
+        // cannot tell that the active default device died.
+        window.addEventListener('effetune:input-track-ended', () => this.handleInputTrackEnded());
     }
 
     /**
@@ -1123,21 +1129,44 @@ class App {
             return;
         }
 
-        // Replug transition detected — debounce against device oscillation.
+        // Replug transition detected — schedule the (debounced) recovery.
+        this._scheduleInputRecovery('devicechange-replug');
+    }
+
+    /**
+     * Schedule a debounced input-device recovery.  Shared entry point for both
+     * recovery triggers:
+     *   - the devicechange replug branch (presence heuristic), and
+     *   - the active-input-track 'ended' event (handleInputTrackEnded), which is
+     *     the reliable signal when the default device dies on a multi-input system
+     *     where the presence heuristic stays "present".
+     * Both triggers share the single debounce timer, so a near-simultaneous
+     * devicechange + 'ended' pair coalesces into one recovery attempt.
+     *
+     * @param {string} reason - short tag for debug logging
+     */
+    _scheduleInputRecovery(reason) {
         if (this._inputDisconnectDebounceTimer) {
             clearTimeout(this._inputDisconnectDebounceTimer);
         }
-        hdmiDebug('IN-HANDLER', 'replug detected — debounce 3s scheduled');
+        hdmiDebug('IN-HANDLER', `input recovery scheduled (${reason}) — debounce 3s`);
         this._inputDisconnectDebounceTimer = setTimeout(async () => {
             this._inputDisconnectDebounceTimer = null;
             hdmiDebug('IN-HANDLER', 'debounce fired');
+
+            // Load prefs fresh at fire time so the routine is self-contained
+            // regardless of which trigger scheduled it.
+            let prefs;
+            try { prefs = await window.electronIntegration.loadAudioPreferences(); }
+            catch (e) { return; }
+            if (!prefs) return;
 
             // Re-confirm the device is still present after the oscillation window.
             let devices2;
             try { devices2 = await navigator.mediaDevices.enumerateDevices(); } catch (e) { return; }
             const inputs2 = devices2.filter(d => d.kind === 'audioinput');
             const stillPresent = prefs.inputDeviceId
-                ? inputs2.some(d => d.deviceId === preferredDeviceId ||
+                ? inputs2.some(d => d.deviceId === prefs.inputDeviceId ||
                     (prefs.inputDeviceLabel && d.label === prefs.inputDeviceLabel))
                 : inputs2.some(d => d.label);
             if (!stillPresent) {
@@ -1168,9 +1197,9 @@ class App {
                 return;
             }
 
-            // Re-resolve the target device id from the POST-debounce
-            // enumeration: a USB id can change again across the oscillation
-            // window, so the 3 s-old preferredDeviceId may now be stale.
+            // Resolve the target device id from the POST-debounce enumeration:
+            // a USB id can change across the oscillation window, so an earlier
+            // resolved id may now be stale.
             let freshPreferredId;
             if (prefs.inputDeviceId) {
                 const f = inputs2.find(d => d.deviceId === prefs.inputDeviceId)
@@ -1203,6 +1232,23 @@ class App {
                 }
             }
         }, 3000);
+    }
+
+    /**
+     * Handle the active input track ending involuntarily (device disconnect).
+     * Dispatched as 'effetune:input-track-ended' by AudioIOManager._monitorInputTrack.
+     * Unlike the presence heuristic, this fires reliably when the default device
+     * dies even if other inputs remain — so it is the primary recovery trigger for
+     * the default-device disconnect/reconnect case on Windows.
+     */
+    handleInputTrackEnded() {
+        if (!window.electronIntegration ||
+            !window.electronIntegration.isElectronEnvironment ||
+            !window.electronIntegration.isElectronEnvironment()) {
+            return;
+        }
+        hdmiDebug('IN-HANDLER', 'input-track-ended received');
+        this._scheduleInputRecovery('track-ended');
     }
 
     /**
