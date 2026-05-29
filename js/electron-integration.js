@@ -47,7 +47,11 @@ class ElectronIntegration {
     // config dialog (invoked from the native "Audio > Configure Audio…" menu).
     if (window.__effetuneNativeHost) {
       this.loadAudioPreferences();
-      window.__effetuneOpenAudioConfig = () => this.showAudioConfigDialog();
+      // Reload saved prefs before showing so previously chosen devices stay selected.
+      window.__effetuneOpenAudioConfig = async () => {
+        await this.loadAudioPreferences();
+        this.showAudioConfigDialog();
+      };
     }
   }
   

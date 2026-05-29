@@ -31,6 +31,8 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
     public func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let dict = message.body as? [String: Any], let cmd = dict["cmd"] as? String else { return }
         switch cmd {
+        case "log":
+            nlog("[js:\((dict["level"] as? String) ?? "log")] \((dict["text"] as? String) ?? "")")
         case "listDevices":
             sendDeviceList()
         case "start":

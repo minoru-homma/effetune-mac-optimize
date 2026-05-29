@@ -1,5 +1,7 @@
 import AppKit
 import WebKit
+import AVFoundation
+import EffeTuneEngine
 
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     private var window: NSWindow!
@@ -15,6 +17,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     }
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        NLog.reset("EffeTune native launch")
+        // Force the microphone TCC prompt up front; input capture fails silently
+        // without it. (Non-sandboxed app uses the Info.plist usage description.)
+        AVCaptureDevice.requestAccess(for: .audio) { granted in
+            nlog("microphone access granted=\(granted)")
+        }
         // Dev fallbacks assume the binary runs from <repo>/native/.build/...; allow env override.
         let cwd = FileManager.default.currentDirectoryPath
         let repoRoot = (cwd as NSString).deletingLastPathComponent // best-effort; env preferred
@@ -32,6 +40,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         let marker = """
         window.__effetuneNativeHost = true;
         window.__effetuneNativePost = function (m) { window.webkit.messageHandlers.effetune.postMessage(m); };
+        (function () {
+          var post = window.__effetuneNativePost;
+          ['log', 'warn', 'error'].forEach(function (level) {
+            var orig = console[level].bind(console);
+            console[level] = function () {
+              try {
+                var parts = Array.prototype.map.call(arguments, function (a) {
+                  try { return typeof a === 'string' ? a : JSON.stringify(a); } catch (e) { return String(a); }
+                });
+                post({ cmd: 'log', level: level, text: parts.join(' ') });
+              } catch (e) {}
+              orig.apply(console, arguments);
+            };
+          });
+          window.addEventListener('error', function (e) {
+            post({ cmd: 'log', level: 'error', text: 'window.onerror: ' + e.message + ' @ ' + e.filename + ':' + e.lineno });
+          });
+          window.addEventListener('unhandledrejection', function (e) {
+            post({ cmd: 'log', level: 'error', text: 'unhandledrejection: ' + (e.reason && e.reason.message ? e.reason.message : e.reason) });
+          });
+        })();
         """
         ucc.addUserScript(WKUserScript(source: marker, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         config.userContentController = ucc

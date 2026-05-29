@@ -35,6 +35,10 @@ public final class CoreAudioEngine {
     private var readIdx: Int = 0
     private var idxLock = os_unfair_lock()
 
+    // Diagnostics (RT-incremented, logged periodically off the hot path).
+    private var inCount = 0, outCount = 0, underruns = 0, inErrors = 0
+    private var lastInErr: OSStatus = 0
+
     // Input-capture scratch + buffer list (planar).
     private var capture: UnsafeMutableBufferPointer<Float>?
     private var captureList: UnsafeMutableAudioBufferListPointer?
@@ -71,10 +75,12 @@ public final class CoreAudioEngine {
         let os = UnsafeMutableBufferPointer<Float>.allocate(capacity: channels * Int(bufferFrames))
         os.initialize(repeating: 0); outScratch = os
 
+        nlog("engine start: sr=\(sampleRate) ch=\(channels) buf=\(bufferFrames) inUID=\(inputUID ?? "default") outUID=\(outputUID ?? "default")")
         try buildInputUnit()
         try buildOutputUnit()
         if let u = inputUnit { try check(AudioOutputUnitStart(u), "start input") }
         if let u = outputUnit { try check(AudioOutputUnitStart(u), "start output") }
+        nlog("engine started OK")
     }
 
     public func stop() {
@@ -115,6 +121,7 @@ public final class CoreAudioEngine {
             var size = UInt32(MemoryLayout<AudioDeviceID>.size)
             AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &a, 0, nil, &size, &devID)
         }
+        nlog("setDevice uid=\(uid ?? "default") -> AudioDeviceID \(devID)")
         var d = devID
         try check(AudioUnitSetProperty(u, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
                                        &d, UInt32(MemoryLayout<AudioDeviceID>.size)), "set device")
@@ -165,7 +172,13 @@ public final class CoreAudioEngine {
                                   mData: UnsafeMutableRawPointer(cap + c * stride))
         }
         let st = AudioUnitRender(u, flags, ts, 1, frames, list.unsafeMutablePointer)
-        if st != noErr { return noErr }
+        inCount += 1
+        if st != noErr {
+            inErrors += 1; lastInErr = st
+            if inErrors <= 3 || inErrors % 200 == 0 { nlog("input render err=\(st) (count \(inErrors))") }
+            return noErr
+        }
+        if inCount <= 2 { nlog("input callback firing (frames \(n))") }
 
         // Write into the ring; on overrun drop this input block (don't touch readIdx).
         os_unfair_lock_lock(&idxLock)
@@ -204,7 +217,13 @@ public final class CoreAudioEngine {
             os_unfair_lock_unlock(&idxLock)
         } else {
             // Underrun: emit silence this cycle (don't advance readIdx).
+            underruns += 1
             for c in 0..<channels { (scratch + c * stride).update(repeating: 0, count: nn) }
+        }
+
+        outCount += 1
+        if outCount <= 2 || outCount % 500 == 0 {
+            nlog("output cb #\(outCount): avail=\(avail) underruns=\(underruns) inCb=\(inCount) inErr=\(inErrors) lastInErr=\(lastInErr)")
         }
 
         chain?.process(scratch, frames: nn)
