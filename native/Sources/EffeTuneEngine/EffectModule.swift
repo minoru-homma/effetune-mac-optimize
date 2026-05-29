@@ -120,6 +120,30 @@ public final class EffectModule {
     public func symbol(_ name: String) -> UnsafeMutableRawPointer? { dlsym(handle, name) }
     public var statePtr: OpaquePointer? { state }
 
+    /// The EffeTune plugin instance id this module mirrors (for routing meters).
+    public var pluginId: String?
+
+    /// Read this effect's meters into the `measurements` shape its JS onMessage
+    /// expects, or nil if it has no live meter. Reads scalar getters off the RT
+    /// state (a benign torn-float race at worst — fine for a meter).
+    public func meters() -> [String: Double]? {
+        typealias GetF = @convention(c) (OpaquePointer?) -> Float
+        func f(_ name: String) -> Double? {
+            guard let s = symbol(name) else { return nil }
+            return Double(unsafeBitCast(s, to: GetF.self)(state))
+        }
+        switch kind.id {
+        case "TransientShaperPlugin":
+            guard let g = f("last_gain_db") else { return nil }
+            return ["gain": g]
+        case "AutoLevelerPlugin":
+            guard let i = f("last_input_lufs"), let o = f("last_output_lufs") else { return nil }
+            return ["inputLufs": i, "outputLufs": o]
+        default:
+            return nil
+        }
+    }
+
     /// Process `frames` of planar (channel-major, stride = frames) audio in place.
     public func process(_ buf: UnsafeMutablePointer<Float>, frames: Int) {
         let n = channels * frames

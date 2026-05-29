@@ -2,6 +2,8 @@ import Foundation
 import WebKit
 import EffeTuneEngine
 
+import QuartzCore
+
 /// Receives commands from the WKWebView (window.webkit.messageHandlers.effetune)
 /// and drives the native CoreAudio engine + effect chain.
 ///
@@ -23,6 +25,7 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
     private var sampleRate: Double = 48000
     private var bufferFrames = 128
     public weak var webView: WKWebView?
+    private var meterTimer: Timer?
 
     public init(dspDir: String) {
         self.dspDir = dspDir
@@ -43,6 +46,7 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
             applyDeviceConfig(dict)
             startEngine()
         case "stop":
+            meterTimer?.invalidate(); meterTimer = nil
             engine.stop()
         case "setPipeline":
             if let dir = dict["dspDir"] as? String { dspDir = dir }
@@ -81,6 +85,31 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
                          bufferFrames: UInt32(bufferFrames), inputUID: inputUID, outputUID: outputUID)
         do { try engine.start() }
         catch { FileHandle.standardError.write(Data("engine start failed: \(error)\n".utf8)) }
+        startMeterTimer()
+    }
+
+    /// Poll each effect's meters ~20x/sec and push them to the matching JS plugin
+    /// (window.__effetuneOnMeters), shaped like the worklet's processBuffer message.
+    private func startMeterTimer() {
+        meterTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in self?.pushMeters() }
+        RunLoop.main.add(timer, forMode: .common)
+        meterTimer = timer
+    }
+
+    private func pushMeters() {
+        guard let chain = engine.chain else { return }
+        let time = CACurrentMediaTime()
+        var list: [[String: Any]] = []
+        for e in chain.effects {
+            guard let id = e.pluginId, var m = e.meters() else { continue }
+            m["time"] = time
+            list.append(["id": id, "measurements": m])
+        }
+        guard !list.isEmpty,
+              let data = try? JSONSerialization.data(withJSONObject: list),
+              let json = String(data: data, encoding: .utf8) else { return }
+        webView?.evaluateJavaScript("window.__effetuneOnMeters && window.__effetuneOnMeters(\(json));")
     }
 
     /// Push the CoreAudio device list to the renderer (window.__effetuneOnDevices).
@@ -110,6 +139,7 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
                                        maxBlock: maxBlock)
             else { continue }
             m.enabled = (desc["enabled"] as? Bool) ?? true
+            m.pluginId = desc["id"] as? String
             apply(desc, to: m)
             chain.append(m)
         }

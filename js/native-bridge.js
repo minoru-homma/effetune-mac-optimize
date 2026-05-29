@@ -24,14 +24,15 @@ function normalize(plugin) {
   const p = plugin.getParameters();
   const type = p.type || plugin.constructor.name;
   const enabled = p.enabled !== false;
+  const id = plugin.id;
 
   switch (type) {
     case 'TransientShaperPlugin':
-      return { type, enabled, payload: { params: [p.fa, p.fr, p.sa, p.sr, p.gt, p.gs, p.sm] } };
+      return { id, type, enabled, payload: { params: [p.fa, p.fr, p.sa, p.sr, p.gt, p.gs, p.sm] } };
 
     case 'BrickwallLimiterPlugin':
       // Rust set_params order: threshold, release, lookahead, input_gain, margin(sm)
-      return { type, enabled, payload: { params: [p.th, p.rl, p.la, p.ig, p.sm ?? -1.0] } };
+      return { id, type, enabled, payload: { params: [p.th, p.rl, p.la, p.ig, p.sm ?? -1.0] } };
 
     case 'FifteenBandPEQPlugin':
     case 'FiveBandPEQPlugin': {
@@ -45,7 +46,7 @@ function normalize(plugin) {
           q: p['q' + i],
         });
       }
-      return { type, enabled, payload: { bands } };
+      return { id, type, enabled, payload: { bands } };
     }
 
     // TODO(full-integration): confirm JS param keys against the Rust set_params
@@ -55,7 +56,7 @@ function normalize(plugin) {
     //   SubSynthPlugin          -> [subLvl, dryLvl, subLpfF, subLpfS, subHpfF, subHpfS, dryHpfF, dryHpfS]
     //   MultibandCompressorPlugin -> crossovers[4] + 5×[threshold,ratio,attack,release,knee,makeup]
     case 'SpectrumAnalyzerPlugin':
-      return { type, enabled, payload: {} };
+      return { id, type, enabled, payload: {} };
 
     default:
       return null; // unsupported on native host
@@ -127,4 +128,18 @@ export const nativeBridge = isNativeHost ? new NativeBridge() : null;
 // Expose to non-module code (e.g. plugins/plugin-base.js loaded via <script>).
 if (isNativeHost && typeof window !== 'undefined') {
   window.nativeBridge = nativeBridge;
+
+  // Receive native meter pushes and route each to the matching plugin's
+  // onMessage, shaped exactly like the worklet's 'processBuffer' message so the
+  // existing plugin meter handlers work unchanged.
+  window.__effetuneOnMeters = (list) => {
+    if (!Array.isArray(list) || !window.audioManager?.pipeline) return;
+    const pipeline = window.audioManager.pipeline;
+    for (const item of list) {
+      const plugin = pipeline.find((p) => p.id === item.id);
+      if (plugin && typeof plugin.onMessage === 'function') {
+        plugin.onMessage({ type: 'processBuffer', pluginId: item.id, measurements: item.measurements });
+      }
+    }
+  };
 }
