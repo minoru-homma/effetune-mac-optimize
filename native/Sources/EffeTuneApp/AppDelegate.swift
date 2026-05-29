@@ -24,6 +24,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         bridge = AudioBridge(dspDir: dspDir)
 
         let config = WKWebViewConfiguration()
+        // Serve the UI over a custom scheme (file:// would block fetch()).
+        config.setURLSchemeHandler(WebSchemeHandler(root: webRoot), forURLScheme: WebSchemeHandler.scheme)
         let ucc = WKUserContentController()
         ucc.add(bridge, name: "effetune")
         // Tell the renderer it is running inside the native host BEFORE app.js runs.
@@ -50,8 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
 
         let indexPath = (webRoot as NSString).appendingPathComponent("effetune.html")
         if FileManager.default.fileExists(atPath: indexPath) {
-            let url = URL(fileURLWithPath: indexPath)
-            webView.loadFileURL(url, allowingReadAccessTo: URL(fileURLWithPath: webRoot))
+            webView.load(URLRequest(url: URL(string: WebSchemeHandler.baseURL + "effetune.html")!))
         } else {
             let html = "<h2 style='font-family:sans-serif'>EffeTune native host</h2>" +
                        "<p>UI not found. Set EFFETUNE_WEBROOT to the repo root (found: \(webRoot)).</p>"
