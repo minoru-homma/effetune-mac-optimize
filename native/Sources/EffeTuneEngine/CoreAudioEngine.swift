@@ -63,14 +63,14 @@ public final class CoreAudioEngine {
 
     public func start() throws {
         stop()
-        // Match the engine sample rate to the OUTPUT device's nominal rate. Forcing
-        // a rate the device can't run (e.g. 96k on a display) lets init/start
-        // succeed yet the IO thread never fires its callbacks. The input AUHAL
-        // resamples its device to this rate via its client format.
-        let outDev = AudioDevices.deviceID(forUID: outputUID ?? "")
-            ?? AudioDevices.defaultDeviceID(kAudioHardwarePropertyDefaultOutputDevice)
-        if let devSR = AudioDevices.nominalSampleRate(outDev), devSR != sampleRate {
-            nlog("override sampleRate \(sampleRate) -> output device \(devSR)")
+        // Run the engine at the INPUT device's nominal rate. The input AUHAL then
+        // needs no sample-rate conversion (mismatched input SRC fails with
+        // -10863 / CannotDoInCurrentContext). The OUTPUT AUHAL converts engineSR
+        // -> output-device rate, which is the reliable direction.
+        let inDev = AudioDevices.deviceID(forUID: inputUID ?? "")
+            ?? AudioDevices.defaultDeviceID(kAudioHardwarePropertyDefaultInputDevice)
+        if let devSR = AudioDevices.nominalSampleRate(inDev), devSR != sampleRate {
+            nlog("override sampleRate \(sampleRate) -> input device \(devSR)")
             sampleRate = devSR
         }
         // Ring sized to comfortably hold several device buffers of slack.

@@ -109,6 +109,8 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
             apply(desc, to: m)
             chain.append(m)
         }
+        let summary = chain.effects.map { "\($0.kind.id)\($0.enabled ? "" : "(off)")" }.joined(separator: ", ")
+        nlog("rebuildChain: \(chain.effects.count) effect(s): [\(summary)]")
         engine.chain = chain // see EffectChain note: production needs a lock-free swap
     }
 
@@ -125,14 +127,20 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
         case "BrickwallLimiterPlugin":m.setLimiter(floats("params"))
         case "FifteenBandPEQPlugin", "FiveBandPEQPlugin":
             if let bands = payload["bands"] as? [[String: Any]] {
+                var active = 0
                 for (i, b) in bands.enumerated() {
-                    m.setPeqBand(i,
-                                 enabled: (b["enabled"] as? Bool) ?? true,
+                    let en = (b["enabled"] as? Bool) ?? true
+                    let g = ((b["gain"] as? NSNumber)?.floatValue) ?? 0
+                    if en && g != 0 { active += 1 }
+                    m.setPeqBand(i, enabled: en,
                                  typeId: (b["typeId"] as? Int) ?? 0,
                                  freq: ((b["freq"] as? NSNumber)?.floatValue) ?? 1000,
-                                 gainDb: ((b["gain"] as? NSNumber)?.floatValue) ?? 0,
+                                 gainDb: g,
                                  q: ((b["q"] as? NSNumber)?.floatValue) ?? 1)
                 }
+                nlog("PEQ \(m.kind.id): \(bands.count) bands, \(active) with non-zero gain")
+            } else {
+                nlog("PEQ \(m.kind.id): no bands payload!")
             }
         case "MultibandCompressorPlugin":
             let x = floats("crossovers")
