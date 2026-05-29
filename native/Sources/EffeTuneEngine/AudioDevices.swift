@@ -50,6 +50,11 @@ public enum AudioDevices {
         return s as String
     }
 
+    /// Input channel count of a device (0 if it has no input).
+    public static func inputChannelCount(_ dev: AudioDeviceID) -> Int {
+        channels(dev, scope: kAudioObjectPropertyScopeInput)
+    }
+
     /// Channel count available on a device for the given scope (input/output).
     private static func channels(_ dev: AudioDeviceID, scope: AudioObjectPropertyScope) -> Int {
         var a = addr(kAudioDevicePropertyStreamConfiguration, scope)

@@ -21,6 +21,9 @@ public final class CoreAudioEngine {
     public private(set) var bufferFrames: UInt32 = 128
     private var inputUID: String?
     private var outputUID: String?
+    private var inputChannels = 2   // actual capture channels (e.g. 1 for a mono USB mic)
+    private let maxFrames = 4096    // matches MaximumFramesPerSlice; a callback may
+                                    // deliver more than bufferFrames (esp. after SRC)
 
     public var chain: EffectChain?
 
@@ -71,7 +74,7 @@ public final class CoreAudioEngine {
             sampleRate = devSR
         }
         // Ring sized to comfortably hold several device buffers of slack.
-        ringFrames = max(8192, Int(bufferFrames) * 16)
+        ringFrames = max(8192, maxFrames * 4)
         ring = (0..<channels).map { _ in
             let p = UnsafeMutablePointer<Float>.allocate(capacity: ringFrames)
             p.initialize(repeating: 0, count: ringFrames)
@@ -79,10 +82,11 @@ public final class CoreAudioEngine {
         }
         writeIdx = 0; readIdx = ringFrames / 2 // prime with half-buffer of latency
 
-        let cap = UnsafeMutableBufferPointer<Float>.allocate(capacity: channels * Int(bufferFrames))
+        // Scratch buffers sized to the max slice (per-channel stride = maxFrames).
+        let cap = UnsafeMutableBufferPointer<Float>.allocate(capacity: channels * maxFrames)
         cap.initialize(repeating: 0); capture = cap
         captureList = AudioBufferList.allocate(maximumBuffers: channels)
-        let os = UnsafeMutableBufferPointer<Float>.allocate(capacity: channels * Int(bufferFrames))
+        let os = UnsafeMutableBufferPointer<Float>.allocate(capacity: channels * maxFrames)
         os.initialize(repeating: 0); outScratch = os
 
         nlog("engine start: sr=\(sampleRate) ch=\(channels) buf=\(bufferFrames) inUID=\(inputUID ?? "default") outUID=\(outputUID ?? "default")")
@@ -115,12 +119,12 @@ public final class CoreAudioEngine {
         ring.forEach { $0.deallocate() }; ring = []
     }
 
-    private func asbd() -> AudioStreamBasicDescription {
+    private func asbd(_ ch: Int) -> AudioStreamBasicDescription {
         AudioStreamBasicDescription(
             mSampleRate: sampleRate, mFormatID: kAudioFormatLinearPCM,
             mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsNonInterleaved,
             mBytesPerPacket: 4, mFramesPerPacket: 1, mBytesPerFrame: 4,
-            mChannelsPerFrame: UInt32(channels), mBitsPerChannel: 32, mReserved: 0)
+            mChannelsPerFrame: UInt32(ch), mBitsPerChannel: 32, mReserved: 0)
     }
 
     private func makeHAL() throws -> AudioUnit {
@@ -155,7 +159,13 @@ public final class CoreAudioEngine {
         try check(AudioUnitSetProperty(u, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, &enableIn, 4), "enable in")
         try check(AudioUnitSetProperty(u, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, &disableOut, 4), "disable out")
         try setDevice(u, uid: inputUID, fallbackDefault: kAudioHardwarePropertyDefaultInputDevice)
-        var fmt = asbd()
+        // Match the input unit's client format to the device's channel count
+        // (a mono USB mic exposes 1ch; forcing 2ch makes the input callback never
+        // fire). We up-mix to the engine's channel count when filling the ring.
+        let inDev = AudioDevices.deviceID(forUID: inputUID ?? "") ?? AudioDevices.defaultDeviceID(kAudioHardwarePropertyDefaultInputDevice)
+        inputChannels = max(1, min(channels, AudioDevices.inputChannelCount(inDev)))
+        nlog("input channels=\(inputChannels) (engine ch=\(channels))")
+        var fmt = asbd(inputChannels)
         // Format we read FROM the input bus (scope output of element 1).
         try check(AudioUnitSetProperty(u, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1, &fmt,
                                        UInt32(MemoryLayout<AudioStreamBasicDescription>.size)), "input fmt")
@@ -179,7 +189,7 @@ public final class CoreAudioEngine {
         try check(AudioUnitSetProperty(u, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, &enableOut, 4), "enable out")
         try check(AudioUnitSetProperty(u, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, &disableIn, 4), "disable in(out unit)")
         try setDevice(u, uid: outputUID, fallbackDefault: kAudioHardwarePropertyDefaultOutputDevice)
-        var fmt = asbd()
+        var fmt = asbd(channels)
         // Format we provide TO the output bus (scope input of element 0).
         try check(AudioUnitSetProperty(u, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &fmt,
                                        UInt32(MemoryLayout<AudioStreamBasicDescription>.size)), "output fmt")
@@ -199,11 +209,12 @@ public final class CoreAudioEngine {
     fileprivate func captureInput(_ flags: UnsafeMutablePointer<AudioUnitRenderActionFlags>,
                                   _ ts: UnsafePointer<AudioTimeStamp>, _ frames: UInt32) -> OSStatus {
         guard let u = inputUnit, let cap = capture?.baseAddress, let list = captureList else { return noErr }
-        let n = Int(frames), stride = Int(bufferFrames)
-        if n > stride { return noErr }
-        for c in 0..<channels {
+        let n = Int(frames)
+        if n > maxFrames { return noErr }
+        list.unsafeMutablePointer.pointee.mNumberBuffers = UInt32(inputChannels)
+        for c in 0..<inputChannels {
             list[c] = AudioBuffer(mNumberChannels: 1, mDataByteSize: UInt32(n * 4),
-                                  mData: UnsafeMutableRawPointer(cap + c * stride))
+                                  mData: UnsafeMutableRawPointer(cap + c * maxFrames))
         }
         let st = AudioUnitRender(u, flags, ts, 1, frames, list.unsafeMutablePointer)
         inCount += 1
@@ -223,7 +234,11 @@ public final class CoreAudioEngine {
         if free < n { return noErr } // overrun: drop
         for i in 0..<n {
             let pos = (w + i) % ringFrames
-            for c in 0..<channels { ring[c][pos] = cap[c * stride + i] }
+            // Up-mix capture channels to engine channels (mono mic -> both).
+            for c in 0..<channels {
+                let src = min(c, inputChannels - 1)
+                ring[c][pos] = cap[src * maxFrames + i]
+            }
         }
         os_unfair_lock_lock(&idxLock)
         writeIdx = (writeIdx + n) % ringFrames
@@ -233,8 +248,9 @@ public final class CoreAudioEngine {
 
     fileprivate func renderOutput(_ frames: UInt32, _ ioData: UnsafeMutablePointer<AudioBufferList>?) -> OSStatus {
         guard let outList = ioData, let scratch = outScratch?.baseAddress else { return noErr }
-        let n = Int(frames), stride = Int(bufferFrames)
-        let nn = min(n, stride)
+        let nn = min(Int(frames), maxFrames)
+        // Tightly pack per-channel data with stride = nn (the layout the Rust
+        // chain expects: idx = ch*frames + i).
 
         os_unfair_lock_lock(&idxLock)
         let w = writeIdx, r = readIdx
@@ -244,7 +260,7 @@ public final class CoreAudioEngine {
         if avail >= nn {
             for i in 0..<nn {
                 let pos = (r + i) % ringFrames
-                for c in 0..<channels { scratch[c * stride + i] = ring[c][pos] }
+                for c in 0..<channels { scratch[c * nn + i] = ring[c][pos] }
             }
             os_unfair_lock_lock(&idxLock)
             readIdx = (readIdx + nn) % ringFrames
@@ -252,19 +268,19 @@ public final class CoreAudioEngine {
         } else {
             // Underrun: emit silence this cycle (don't advance readIdx).
             underruns += 1
-            for c in 0..<channels { (scratch + c * stride).update(repeating: 0, count: nn) }
+            for c in 0..<channels { (scratch + c * nn).update(repeating: 0, count: nn) }
         }
 
         outCount += 1
         if outCount <= 2 || outCount % 500 == 0 {
-            nlog("output cb #\(outCount): avail=\(avail) underruns=\(underruns) inCb=\(inCount) inErr=\(inErrors) lastInErr=\(lastInErr)")
+            nlog("output cb #\(outCount) frames=\(frames): avail=\(avail) underruns=\(underruns) inCb=\(inCount) inErr=\(inErrors)")
         }
 
         chain?.process(scratch, frames: nn)
 
         let out = UnsafeMutableAudioBufferListPointer(outList)
         for c in 0..<min(channels, out.count) {
-            if let dst = out[c].mData { dst.copyMemory(from: scratch + c * stride, byteCount: nn * 4) }
+            if let dst = out[c].mData { dst.copyMemory(from: scratch + c * nn, byteCount: nn * 4) }
         }
         return noErr
     }
