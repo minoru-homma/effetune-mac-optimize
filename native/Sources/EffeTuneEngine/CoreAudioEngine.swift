@@ -60,6 +60,16 @@ public final class CoreAudioEngine {
 
     public func start() throws {
         stop()
+        // Match the engine sample rate to the OUTPUT device's nominal rate. Forcing
+        // a rate the device can't run (e.g. 96k on a display) lets init/start
+        // succeed yet the IO thread never fires its callbacks. The input AUHAL
+        // resamples its device to this rate via its client format.
+        let outDev = AudioDevices.deviceID(forUID: outputUID ?? "")
+            ?? AudioDevices.defaultDeviceID(kAudioHardwarePropertyDefaultOutputDevice)
+        if let devSR = AudioDevices.nominalSampleRate(outDev), devSR != sampleRate {
+            nlog("override sampleRate \(sampleRate) -> output device \(devSR)")
+            sampleRate = devSR
+        }
         // Ring sized to comfortably hold several device buffers of slack.
         ringFrames = max(8192, Int(bufferFrames) * 16)
         ring = (0..<channels).map { _ in
@@ -80,7 +90,18 @@ public final class CoreAudioEngine {
         try buildOutputUnit()
         if let u = inputUnit { try check(AudioOutputUnitStart(u), "start input") }
         if let u = outputUnit { try check(AudioOutputUnitStart(u), "start output") }
-        nlog("engine started OK")
+        nlog("engine started OK (sr=\(sampleRate))")
+        // 1.5s later, report whether the IO threads actually ran.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self = self else { return }
+            func running(_ u: AudioUnit?) -> UInt32 {
+                guard let u = u else { return 99 }
+                var r: UInt32 = 0; var sz = UInt32(MemoryLayout<UInt32>.size)
+                AudioUnitGetProperty(u, kAudioOutputUnitProperty_IsRunning, kAudioUnitScope_Global, 0, &r, &sz)
+                return r
+            }
+            nlog("post-start 1.5s: inRunning=\(running(self.inputUnit)) outRunning=\(running(self.outputUnit)) inCb=\(self.inCount) outCb=\(self.outCount) inErr=\(self.inErrors) lastInErr=\(self.lastInErr) underruns=\(self.underruns)")
+        }
     }
 
     public func stop() {
@@ -147,6 +168,9 @@ public final class CoreAudioEngine {
     private func buildOutputUnit() throws {
         let u = try makeHAL()
         outputUnit = u
+        var enableOut: UInt32 = 1, disableIn: UInt32 = 0
+        try check(AudioUnitSetProperty(u, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, &enableOut, 4), "enable out")
+        try check(AudioUnitSetProperty(u, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, &disableIn, 4), "disable in(out unit)")
         try setDevice(u, uid: outputUID, fallbackDefault: kAudioHardwarePropertyDefaultOutputDevice)
         var fmt = asbd()
         // Format we provide TO the output bus (scope input of element 0).

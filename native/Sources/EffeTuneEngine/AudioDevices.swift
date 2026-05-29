@@ -72,6 +72,19 @@ public enum AudioDevices {
         return nil
     }
 
+    public static func defaultDeviceID(_ sel: AudioObjectPropertySelector) -> AudioDeviceID {
+        defaultDevice(sel)
+    }
+
+    /// The device's current nominal sample rate (Hz), or nil.
+    public static func nominalSampleRate(_ dev: AudioDeviceID) -> Double? {
+        var a = addr(kAudioDevicePropertyNominalSampleRate)
+        var sr: Double = 0
+        var size = UInt32(MemoryLayout<Double>.size)
+        guard AudioObjectGetPropertyData(dev, &a, 0, nil, &size, &sr) == noErr, sr > 0 else { return nil }
+        return sr
+    }
+
     public static func list() -> [AudioDeviceInfo] {
         let defIn = defaultDevice(kAudioHardwarePropertyDefaultInputDevice)
         let defOut = defaultDevice(kAudioHardwarePropertyDefaultOutputDevice)
