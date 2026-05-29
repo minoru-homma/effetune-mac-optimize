@@ -159,10 +159,17 @@ public final class CoreAudioEngine {
         // Format we read FROM the input bus (scope output of element 1).
         try check(AudioUnitSetProperty(u, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1, &fmt,
                                        UInt32(MemoryLayout<AudioStreamBasicDescription>.size)), "input fmt")
+        // MaxFramesPerSlice must be >= the device IO buffer or render fails
+        // (TooManyFramesToProcess) and the callback never gets called.
+        var maxFrames: UInt32 = 4096
+        _ = AudioUnitSetProperty(u, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &maxFrames, 4)
         var cb = AURenderCallbackStruct(inputProc: inputProc, inputProcRefCon: Unmanaged.passUnretained(self).toOpaque())
         try check(AudioUnitSetProperty(u, kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0, &cb,
                                        UInt32(MemoryLayout<AURenderCallbackStruct>.size)), "input cb")
         try check(AudioUnitInitialize(u), "init input unit")
+        if let id = AudioDevices.deviceID(forUID: inputUID ?? "") {
+            nlog("input device nominalSR=\(AudioDevices.nominalSampleRate(id).map { String($0) } ?? "nil")")
+        }
     }
 
     private func buildOutputUnit() throws {
@@ -176,12 +183,15 @@ public final class CoreAudioEngine {
         // Format we provide TO the output bus (scope input of element 0).
         try check(AudioUnitSetProperty(u, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &fmt,
                                        UInt32(MemoryLayout<AudioStreamBasicDescription>.size)), "output fmt")
-        var frames = bufferFrames
-        _ = AudioUnitSetProperty(u, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &frames, 4)
+        var maxFrames: UInt32 = 4096
+        _ = AudioUnitSetProperty(u, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &maxFrames, 4)
         var cb = AURenderCallbackStruct(inputProc: outputProc, inputProcRefCon: Unmanaged.passUnretained(self).toOpaque())
         try check(AudioUnitSetProperty(u, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &cb,
                                        UInt32(MemoryLayout<AURenderCallbackStruct>.size)), "output cb")
         try check(AudioUnitInitialize(u), "init output unit")
+        if let id = AudioDevices.deviceID(forUID: outputUID ?? "") {
+            nlog("output device nominalSR=\(AudioDevices.nominalSampleRate(id).map { String($0) } ?? "nil")")
+        }
     }
 
     // MARK: realtime callbacks
