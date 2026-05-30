@@ -206,11 +206,15 @@ public final class EffectModule {
             // Skip the capture entirely when the analyzer isn't visible.
             if !tapActive { return }
             if tapCh.count < channels { return }
+            // Chunked copy (≤2 segments around the wrap) instead of per-sample modulo.
+            let start = tapPos % tapMax
+            let first = min(frames, tapMax - start)
             for c in 0..<channels {
                 let src = buf + c * frames
-                let ring = tapCh[c]
-                var pos = tapPos
-                for i in 0..<frames { ring[pos] = src[i]; pos = (pos + 1) % tapMax }
+                tapCh[c].advanced(by: start).update(from: src, count: first)
+                if first < frames {
+                    tapCh[c].update(from: src + first, count: frames - first)
+                }
             }
             tapPos = (tapPos + frames) % tapMax
             spectrumPosition += frames
