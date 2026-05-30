@@ -665,9 +665,21 @@ class SpectrumAnalyzerPlugin extends PluginBase {
             gpuLogToMain('info', 'WebGPU disabled by ?gpu=0 flag, using Canvas 2D');
         } else if (typeof window === 'undefined') {
             // headless / non-browser context — no GPU
-        } else if (this._gpu || this._gpuPending) {
-            // already initialised or in-flight (createUI may be called twice)
+        } else if (this._gpuPending) {
+            // in-flight (createUI may be called twice); leave it
+        } else if (this._gpu && !window.__effetuneNativeHost) {
+            // already initialised; web/Electron reuse the canvas DOM so the
+            // renderer stays bound to a live canvas
         } else {
+            // Native host re-renders the pipeline UI on add/remove, which builds
+            // NEW canvas elements. A renderer bound to the old (now-detached)
+            // gpuCanvas would draw nowhere and the new gpuCanvas stays hidden.
+            // Drop any stale renderer and re-init against the new canvas.
+            if (this._gpu) {
+                try { this._gpu.destroy(); } catch (_) { /* ignore */ }
+                this._gpu = null;
+                this.labelCanvas = null;
+            }
             this._gpuPending = true;
             const startInit = () => {
                 if (!window.SpectrumAnalyzerGpuRenderer) {
