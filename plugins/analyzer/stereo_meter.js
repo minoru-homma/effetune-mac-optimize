@@ -267,6 +267,7 @@ class StereoMeterPlugin extends PluginBase {
         this.drawMeter();
         this.animationFrameId = requestAnimationFrame(animate);
     };
+    if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, true);
     animate();
   }
 
@@ -275,6 +276,7 @@ class StereoMeterPlugin extends PluginBase {
         cancelAnimationFrame(this.animationFrameId);
         this.animationFrameId = null;
     }
+    if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, false);
   }
 
   drawMeter() {

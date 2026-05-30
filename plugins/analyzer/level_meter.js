@@ -292,6 +292,7 @@ class LevelMeterPlugin extends PluginBase {
             this.updateMeter();
             this.animationFrameId = requestAnimationFrame(animate);
         };
+        if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, true);
         animate();
     }
 
@@ -300,6 +301,7 @@ class LevelMeterPlugin extends PluginBase {
             cancelAnimationFrame(this.animationFrameId);
             this.animationFrameId = null;
         }
+        if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, false);
     }
 
     // Clean up resources when plugin is removed

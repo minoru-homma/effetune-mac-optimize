@@ -29,6 +29,9 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
     public weak var webView: WKWebView?
     private var meterTimer: Timer?
     private var meterTick = 0
+    // Plugin ids of analyzers whose UI is currently visible (expanded + on-screen).
+    // Only these get snapshots/pushes; the meter timer idles when this is empty.
+    private var activeIds: Set<String> = []
 
     public init(dspDir: String) {
         self.dspDir = dspDir
