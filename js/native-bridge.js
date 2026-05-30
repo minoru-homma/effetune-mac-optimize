@@ -167,13 +167,18 @@ class NativeBridge {
     this._saveTimer = setTimeout(() => this._doSaveState(), 800);
   }
   _doSaveState() {
+    // Don't persist until startup finished restoring (else the initial empty
+    // pipeline overwrites the saved state).
+    if (!window.__effetuneReady) return;
     try {
       const core = window.pipelineManager?.core;
       const am = window.audioManager;
       if (!core || !am) return;
       const serialize = (pl) => (pl ? pl.map((p) => core.getSerializablePluginState(p, false, false, false)) : null);
+      const stateA = serialize(am.pipelineA);
+      console.log('[native] saving pipeline state: ' + (stateA ? stateA.length : 0) + ' effect(s)');
       this.savePipelineState({
-        pipelineA: serialize(am.pipelineA),
+        pipelineA: stateA,
         pipelineB: serialize(am.pipelineB),
         currentPipeline: am.currentPipeline,
       });

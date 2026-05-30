@@ -159,16 +159,21 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
         guard let path = appStatePath(), let content = dict["content"] as? String else {
             reply(reqId, ["success": false]); return
         }
-        do { try content.write(toFile: path, atomically: true, encoding: .utf8); reply(reqId, ["success": true]) }
-        catch { reply(reqId, ["success": false, "error": error.localizedDescription]) }
+        do {
+            try content.write(toFile: path, atomically: true, encoding: .utf8)
+            nlog("saveAppState: \(content.count) bytes -> \(path)")
+            reply(reqId, ["success": true])
+        } catch { reply(reqId, ["success": false, "error": error.localizedDescription]) }
     }
 
     private func handleLoadAppState(_ dict: [String: Any]) {
         let reqId = dict["reqId"] as? Int ?? 0
         guard let path = appStatePath(), FileManager.default.fileExists(atPath: path),
               let content = try? String(contentsOfFile: path, encoding: .utf8) else {
+            nlog("loadAppState: no saved state")
             reply(reqId, ["success": false]); return
         }
+        nlog("loadAppState: \(content.count) bytes")
         reply(reqId, ["success": true, "content": content])
     }
 

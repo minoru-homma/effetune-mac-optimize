@@ -737,6 +737,11 @@ class App {
             console.log('Audio pipeline rebuilt after error');
         }
 
+        // Startup pipeline is built; allow native auto-save now. (Gating until
+        // here prevents the initial empty pipeline from overwriting the restored
+        // state on the native host.)
+        window.__effetuneReady = true;
+
         if (window.pendingPresetName && window.pipelineManager && window.pipelineManager.presetManager) {
             await window.pipelineManager.presetManager.loadPreset(window.pendingPresetName);
             window.pendingPresetName = null;
