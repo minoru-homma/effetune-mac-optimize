@@ -614,7 +614,8 @@ class App {
                     // Apply serialized state
                     applySerializedState(plugin, state);
                     plugin.updateParameters();
-                    this.uiManager.expandedPlugins.add(plugin);
+                    // Restore panel open/close (default expanded; collapse if saved so).
+                    if (!pluginState.collapsed) this.uiManager.expandedPlugins.add(plugin);
                     return plugin;
                 } catch (error) {
                     console.warn(`Failed to create plugin '${pluginState.name}': ${error.message}`);
@@ -735,16 +736,6 @@ class App {
             await new Promise(resolve => setTimeout(resolve, 100));
             await this.audioManager.rebuildPipeline(true);
             console.log('Audio pipeline rebuilt after error');
-        }
-
-        // Native host: apply saved panel open/close state. Restore expands all
-        // plugins by default; collapse those the saved state marked collapsed.
-        if (window.__effetuneNativeHost && savedState && Array.isArray(savedState.pipelineA)) {
-            const pA = this.audioManager.pipelineA || [];
-            savedState.pipelineA.forEach((st, i) => {
-                if (st && st.collapsed && pA[i]) this.uiManager.expandedPlugins.delete(pA[i]);
-            });
-            this.uiManager.updatePipelineUI(true);
         }
 
         // Startup pipeline is built; allow native auto-save now. (Gating until
