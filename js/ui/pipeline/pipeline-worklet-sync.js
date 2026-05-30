@@ -2,6 +2,8 @@
  * PipelineWorkletSync - Handles synchronization with the audio worklet
  * Manages communication between the UI and the audio processing worklet
  */
+import { isNativeHost, nativeBridge } from '../../native-bridge.js';
+
 export class PipelineWorkletSync {
     /**
      * Create a new PipelineWorkletSync instance
@@ -16,6 +18,7 @@ export class PipelineWorkletSync {
      * Update all plugins in the worklet
      */
     updateWorkletPlugins() {
+        if (isNativeHost) nativeBridge.setPipeline(this.audioManager.pipeline);
         if (window.workletNode) {
             // Prepare plugin data
             const plugins = this.audioManager.pipeline.map(plugin => {
@@ -46,6 +49,7 @@ export class PipelineWorkletSync {
      * @param {Object} plugin - The plugin to update
      */
     updateWorkletPlugin(plugin) {
+        if (isNativeHost) nativeBridge.updateParams(this.audioManager.pipeline);
         if (window.workletNode) {
             const parameters = plugin.getParameters();
             
@@ -70,6 +74,7 @@ export class PipelineWorkletSync {
      * @param {boolean} masterBypass - The master bypass state
      */
     updateMasterBypass(masterBypass) {
+        if (isNativeHost) nativeBridge.setPipeline(masterBypass ? [] : this.audioManager.pipeline);
         if (window.workletNode) {
             // Prepare plugin data
             const plugins = this.audioManager.pipeline.map(plugin => {
@@ -100,6 +105,7 @@ export class PipelineWorkletSync {
      * @param {Object} plugin - The plugin whose parameters changed
      */
     sendParameterUpdate(plugin) {
+        if (isNativeHost) nativeBridge.updateParams(this.audioManager.pipeline);
         if (window.workletNode) {
             const parameters = plugin.getParameters();
             window.workletNode.port.postMessage({
@@ -141,6 +147,7 @@ export class PipelineWorkletSync {
      * @param {Array} plugins - Array of plugins to update
      */
     batchUpdatePlugins(plugins) {
+        if (isNativeHost) nativeBridge.setPipeline(this.audioManager.pipeline);
         if (window.workletNode && plugins.length > 0) {
             const pluginData = plugins.map(plugin => this.preparePluginData(plugin));
             
@@ -157,6 +164,7 @@ export class PipelineWorkletSync {
      * @param {number} pluginId - The ID of the plugin to remove
      */
     removePlugin(pluginId) {
+        if (isNativeHost) nativeBridge.setPipeline(this.audioManager.pipeline);
         if (window.workletNode) {
             window.workletNode.port.postMessage({
                 type: 'removePlugin',
@@ -172,6 +180,7 @@ export class PipelineWorkletSync {
      * @param {number} index - The index to insert at
      */
     addPlugin(plugin, index) {
+        if (isNativeHost) nativeBridge.setPipeline(this.audioManager.pipeline);
         if (window.workletNode) {
             const pluginData = this.preparePluginData(plugin);
             
@@ -190,6 +199,7 @@ export class PipelineWorkletSync {
      * @param {number} toIndex - The index to move to
      */
     reorderPlugin(fromIndex, toIndex) {
+        if (isNativeHost) nativeBridge.setPipeline(this.audioManager.pipeline);
         if (window.workletNode) {
             window.workletNode.port.postMessage({
                 type: 'reorderPlugin',
