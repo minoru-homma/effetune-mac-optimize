@@ -171,14 +171,26 @@ if (isNativeHost && typeof window !== 'undefined') {
   // Receive native meter pushes and route each to the matching plugin's
   // onMessage, shaped exactly like the worklet's 'processBuffer' message so the
   // existing plugin meter handlers work unchanged.
+  // JSON carries plain arrays, but the analyzers expect Float32Array (the worklet
+  // sends typed arrays via structured clone). Convert numeric arrays so methods
+  // like buffer.subarray() work. Leaves arrays of objects (e.g. channels) alone.
+  const toTyped = (v) => {
+    if (!Array.isArray(v) || v.length === 0) return v;
+    if (typeof v[0] === 'number') return Float32Array.from(v);
+    if (Array.isArray(v[0])) return v.map((inner) => Float32Array.from(inner));
+    return v;
+  };
+
   window.__effetuneOnMeters = (list) => {
     if (!Array.isArray(list) || !window.audioManager?.pipeline) return;
     const pipeline = window.audioManager.pipeline;
     for (const item of list) {
+      const m = item.measurements;
+      if (m && typeof m === 'object') for (const k in m) m[k] = toTyped(m[k]);
       // native sends id as a string; plugin.id is numeric — compare loosely.
       const plugin = pipeline.find((p) => String(p.id) === String(item.id));
       if (plugin && typeof plugin.onMessage === 'function') {
-        plugin.onMessage({ type: 'processBuffer', pluginId: item.id, measurements: item.measurements });
+        plugin.onMessage({ type: 'processBuffer', pluginId: item.id, measurements: m });
       }
     }
   };
