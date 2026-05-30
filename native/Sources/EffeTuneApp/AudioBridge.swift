@@ -109,9 +109,16 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
         let time = CACurrentMediaTime()
         var list: [[String: Any]] = []
         for e in chain.effects {
-            guard let id = e.pluginId, var m = e.meters() else { continue }
-            m["time"] = time
-            list.append(["id": id, "measurements": m])
+            guard let id = e.pluginId else { continue }
+            if let snap = e.spectrumSnapshot() {
+                // Spectrum Analyzer: send the time-domain window; JS runs its FFT.
+                let meas: [String: Any] = ["buffer": [snap], "bufferPosition": e.spectrumPosition,
+                                           "sampleRate": engine.sampleRate, "time": time]
+                list.append(["id": id, "measurements": meas])
+            } else if var m = e.meters() {
+                m["time"] = time
+                list.append(["id": id, "measurements": m])
+            }
         }
         guard !list.isEmpty,
               let data = try? JSONSerialization.data(withJSONObject: list),
@@ -192,8 +199,10 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
                     if p.count == 6 { m.setMultibandBand(i, p) }
                 }
             }
+        case "SpectrumAnalyzerPlugin":
+            if let pt = payload["pt"] as? Int { m.spectrumWindow = 1 << pt }
         default:
-            break // SpectrumAnalyzer: no params to push
+            break
         }
     }
 }

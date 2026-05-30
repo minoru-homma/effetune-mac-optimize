@@ -53,11 +53,19 @@ function normalize(plugin) {
       return { id, type, enabled, payload: { bands } };
     }
 
-    // TODO(full-integration): SubSynth and Multiband still need their JS param
-    // keys mapped to the Rust set_params/set_band order; until then they are
-    // skipped (not added to the native chain).
+    case 'SubSynthPlugin':
+      // Rust set_params: subLvl, dryLvl, subLpfF, subLpfSlope, subHpfF, subHpfSlope, dryHpfF, dryHpfSlope
+      return { id, type, enabled, payload: { params: [p.sl, p.dl, p.slf, p.sls, p.shf, p.shs, p.dhf, p.dhs] } };
+
+    case 'MultibandCompressorPlugin': {
+      // crossovers f1..f4 + 5 bands [threshold, ratio, attack, release, knee, makeup]
+      const bands = (p.bands || []).map((b) => ({ params: [b.t, b.r, b.a, b.rl, b.k, b.g] }));
+      return { id, type, enabled, payload: { crossovers: [p.f1, p.f2, p.f3, p.f4], bands } };
+    }
+
     case 'SpectrumAnalyzerPlugin':
-      return { id, type, enabled, payload: {} };
+      // Native taps a 2^pt time-domain window for the analyzer's own FFT.
+      return { id, type, enabled, payload: { pt: p.pt } };
 
     default:
       return null; // unsupported on native host

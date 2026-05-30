@@ -106,13 +106,16 @@ public final class EffectModule {
             self.inputFn = unsafeBitCast(inp, to: FnPtr.self)
             self.processFn = nil; self.ioFn = nil; self.outputFn = nil
             let initFn = unsafeBitCast(ip, to: FnInitAnalyzer.self)
-            self.state = initFn(4096) // default FFT points
+            self.state = initFn(12) // Rust init takes the FFT exponent (pt); 2^12 = 4096
+            let t = UnsafeMutableBufferPointer<Float>.allocate(capacity: tapMax)
+            t.initialize(repeating: 0); self.tap = t
         }
         if state == nil { return nil }
     }
 
     deinit {
         if let s = state { freeFn(s) }
+        tap?.deallocate()
         dlclose(handle)
     }
 
@@ -122,6 +125,15 @@ public final class EffectModule {
 
     /// The EffeTune plugin instance id this module mirrors (for routing meters).
     public var pluginId: String?
+
+    // Spectrum-analyzer time-domain tap: a fixed max-size ring of mono-averaged
+    // samples; the JS analyzer runs its own FFT on the last `spectrumWindow`
+    // samples. Fixed allocation avoids realloc races when the FFT size changes.
+    private let tapMax = 32768
+    private var tap: UnsafeMutableBufferPointer<Float>?
+    private var tapPos = 0
+    public var spectrumWindow = 4096   // = 1 << pt (default pt=12)
+    public var spectrumPosition = 0    // running counter for measurements.bufferPosition
 
     /// Read this effect's meters into the `measurements` shape its JS onMessage
     /// expects, or nil if it has no live meter. Reads scalar getters off the RT
@@ -159,9 +171,27 @@ public final class EffectModule {
             proc(state, UInt32(frames))
             buf.update(from: outp, count: n)
         case .analyzer:
-            guard let inp = inputFn?(state), let an = analyzeFn else { return }
-            inp.update(from: buf, count: n)
-            an(state, 0) // read-only; buffer passes through unchanged
+            // Tap mono-averaged samples into the ring; audio passes through.
+            guard let t = tap?.baseAddress else { return }
+            let inv = 1.0 / Float(channels)
+            for i in 0..<frames {
+                var s: Float = 0
+                for c in 0..<channels { s += buf[c * frames + i] }
+                t[tapPos] = s * inv
+                tapPos = (tapPos + 1) % tapMax
+            }
+            spectrumPosition += frames
         }
+    }
+
+    /// Linearized last `spectrumWindow` mono samples for the JS analyzer's FFT,
+    /// or nil if this isn't an analyzer. (Benign torn-float race with the RT tap.)
+    public func spectrumSnapshot() -> [Float]? {
+        guard kind.family == .analyzer, let t = tap?.baseAddress else { return nil }
+        let nWin = min(spectrumWindow, tapMax)
+        var out = [Float](repeating: 0, count: nWin)
+        let start = (tapPos - nWin + tapMax) % tapMax
+        for i in 0..<nWin { out[i] = t[(start + i) % tapMax] }
+        return out
     }
 }
