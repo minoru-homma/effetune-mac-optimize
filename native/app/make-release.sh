@@ -63,8 +63,14 @@ for item in effetune.html effetune.css manifest.json js plugins locales presets 
 done
 
 # 5. Sign (ad-hoc) the whole bundle.
+#    NOTE: no --options runtime here. Hardened runtime requires the microphone
+#    entitlement (and disable-library-validation for our dlopen'd dylibs); without
+#    a Developer ID + provisioning that path silently denies mic access. Plain
+#    ad-hoc + Info.plist NSMicrophoneUsageDescription gets the normal TCC prompt.
+#    For notarized distribution, sign with Developer ID + --options runtime +
+#    native/app/entitlements.plist instead.
 echo "[release] ad-hoc codesign"
-codesign --force --deep --options runtime --sign - "$APP" || echo "[release] codesign warning"
+codesign --force --deep --sign - "$APP" || echo "[release] codesign warning"
 codesign --verify --deep --strict "$APP" && echo "[release] codesign OK"
 
 echo "[release] app arch: $(lipo -archs "$APP/Contents/MacOS/EffeTuneApp" 2>/dev/null)"
