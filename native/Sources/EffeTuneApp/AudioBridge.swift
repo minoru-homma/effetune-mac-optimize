@@ -100,7 +100,9 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
     /// (window.__effetuneOnMeters), shaped like the worklet's processBuffer message.
     private func startMeterTimer() {
         meterTimer?.invalidate()
-        let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in self?.pushMeters() }
+        // ~30 Hz: closer to the worklet's per-half-FFT cadence so the spectrum
+        // updates as smoothly as the original.
+        let timer = Timer(timeInterval: 0.033, repeats: true) { [weak self] _ in self?.pushMeters() }
         RunLoop.main.add(timer, forMode: .common)
         meterTimer = timer
     }
