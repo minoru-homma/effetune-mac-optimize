@@ -29,6 +29,7 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
     public weak var webView: WKWebView?
     private var meterTimer: Timer?
     private var meterTick = 0
+    private var lastSpectrumTime: Double = 0 // for native FFT peak-decay timing
     // Plugin ids of analyzers whose UI is currently visible (expanded + on-screen).
     // Only these get snapshots/pushes; the meter timer idles when this is empty.
     private var activeIds: Set<String> = []
@@ -265,7 +266,19 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
             guard activeIds.contains(id) || isScalar else { continue }
             var meas: [String: Any]? = nil
             switch e.kind.id {
-            case "SpectrumAnalyzerPlugin", "SpectrogramPlugin":
+            case "SpectrumAnalyzerPlugin":
+                // Run the FFT natively (Rust) and send dB spectrum + peaks, so the
+                // web view skips its per-frame FFT and we send half the floats.
+                let dt = lastSpectrumTime > 0 ? Float(time - lastSpectrumTime) : 0.033
+                lastSpectrumTime = time
+                if let r = e.spectrumComputed(decay: 20.0 * dt) {
+                    meas = ["spectrum": f32(r.spectrum), "peaks": f32(r.peaks),
+                            "sampleRate": engine.sampleRate, "time": time]
+                } else if let snap = e.spectrumSnapshot() { // fallback (non-4096 FFT)
+                    meas = ["buffer": [f32(snap)], "bufferPosition": e.spectrumPosition,
+                            "sampleRate": engine.sampleRate, "time": time]
+                }
+            case "SpectrogramPlugin":
                 // Time-domain mono window; the JS analyzer runs its own FFT.
                 if let snap = e.spectrumSnapshot() {
                     meas = ["buffer": [f32(snap)], "bufferPosition": e.spectrumPosition,

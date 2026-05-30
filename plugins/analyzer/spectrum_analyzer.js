@@ -232,6 +232,19 @@ class SpectrumAnalyzerPlugin extends PluginBase {
     }
 
     process(message) {
+        // Native fast path: the engine already ran the FFT (Rust) and sent dB
+        // spectrum + peaks. Just adopt them — no per-frame FFT in the web view.
+        const m = message?.measurements;
+        if (m && m.spectrum) {
+            if (m.sampleRate && this.sampleRate !== m.sampleRate) this.sampleRate = m.sampleRate;
+            const halfN = m.spectrum.length;
+            if (!this.spectrum || this.spectrum.length !== halfN) this.spectrum = new Float32Array(halfN);
+            if (!this.peaks || this.peaks.length !== halfN) this.peaks = new Float32Array(halfN);
+            this.spectrum.set(m.spectrum);
+            if (m.peaks) this.peaks.set(m.peaks);
+            this.lastProcessTime = m.time;
+            return;
+        }
         if (!message?.measurements?.buffer) {
             return;
         }

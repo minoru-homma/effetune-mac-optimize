@@ -248,6 +248,40 @@ public final class EffectModule {
         return out
     }
 
+    /// Run the Rust FFT (Spectrum Analyzer dylib) on the captured window and
+    /// return the (spectrum dB, peaks dB) halves directly, so the JS analyzer can
+    /// just draw — no per-frame FFT in the web view, and half the bytes to send.
+    /// `decay` is the per-update peak fall (JS uses 20·deltaTime).
+    public func spectrumComputed(decay: Float) -> (spectrum: [Float], peaks: [Float])? {
+        typealias FnAnalyze = @convention(c) (OpaquePointer?, UInt32) -> Void
+        typealias FnDecay   = @convention(c) (OpaquePointer?, Float) -> Void
+        guard kind.id == "SpectrumAnalyzerPlugin",
+              let snap = spectrumSnapshot(),
+              let inPtr = symbol("input_ptr"), let anPtr = symbol("analyze"),
+              let specPtr = symbol("spectrum_ptr"), let pkPtr = symbol("peaks_ptr"),
+              let upPtr = symbol("update_peaks") else { return nil }
+        let fftSize = snap.count
+        // The Rust state is init'd at pt=12 (4096). If the UI picked another FFT
+        // size, fall back to the time-domain path (JS FFT) to avoid a size mismatch.
+        guard fftSize == 4096 else { return nil }
+        let half = fftSize / 2
+        guard let input = unsafeBitCast(inPtr, to: FnPtr.self)(state) else { return nil }
+        // The snapshot is chronological (oldest-first), so buffer_position = 0
+        // matches the Rust window read (mirrors the JS WASM path).
+        input.update(from: snap, count: fftSize)
+        unsafeBitCast(anPtr, to: FnAnalyze.self)(state, 0)
+        unsafeBitCast(upPtr, to: FnDecay.self)(state, decay)
+        guard let sp = unsafeBitCast(specPtr, to: FnPtr.self)(state),
+              let pk = unsafeBitCast(pkPtr, to: FnPtr.self)(state) else { return nil }
+        var spectrum = [Float](repeating: 0, count: half)
+        var peaks = [Float](repeating: 0, count: half)
+        for i in 0..<half {
+            spectrum[i] = sp[i].isFinite ? sp[i] : -144
+            peaks[i] = pk[i].isFinite ? pk[i] : -144
+        }
+        return (spectrum, peaks)
+    }
+
     /// The full per-sample mono ring (ring order) + write head, for the
     /// Oscilloscope, which indexes the ring by absolute position.
     public func monoRingSnapshot() -> (buffer: [Float], position: Int)? {
