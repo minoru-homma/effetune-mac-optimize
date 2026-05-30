@@ -116,6 +116,7 @@ class LevelMeterPlugin extends PluginBase {
     onMessage(message) {
         if (message.type === 'processBuffer') {
             this.process(message);
+            this._needsRedraw = true; // gate the RAF redraw to data arrival (native)
         }
     }
 
