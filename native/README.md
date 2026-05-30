@@ -92,15 +92,23 @@ EFFETUNE_WEBROOT="$(pwd)" open native/.build/EffeTune.app
       offline (`dsptest` → PASS).
 - [x] Per-effect param marshalling: io & split families + PEQ `set_band`, limiter,
       transient, sub-synth, auto-leveler, multiband (`EffectParams.swift`).
-- [x] `CoreAudioEngine` AUHAL duplex written (compiles; live audio test pending in
-      the app — needs a device + mic permission).
+- [x] `CoreAudioEngine`: **dual-unit AUHAL** (separate input + output devices)
+      bridged by a ring buffer; engine runs at the input device's rate, output
+      AUHAL converts to the output device. Device enumeration + selection wired.
+      **LIVE: audio passes input→chain→output; PEQ effect confirmed audible.**
 - [x] WKWebView host app (`native/Sources/EffeTuneApp`) + JS↔Native bridge
       (`AudioBridge.swift`); assembles into a codesigned `EffeTune.app` via
-      `native/app/make-app.sh` (Info.plist + 8 dylibs + binary, codesign valid).
-- [~] Renderer bridge client `js/native-bridge.js`: native-mode detection +
-      per-effect normalizers (transient/limiter/PEQ confirmed; auto-leveler /
-      sub-synth / multiband keys still TODO). NOT yet hooked into `AudioManager`
-      (Web Audio still drives audio until the controller-mode wiring lands).
+      `native/app/make-app.sh`. Custom `effetune://` scheme serves the UI;
+      native Audio menu opens the config dialog; mic permission requested.
+- [x] Renderer fully in controller mode: `AudioManager` + `PipelineWorkletSync`
+      route pipeline/param changes to native (Web Audio off). Normalizers for
+      PEQ / transient / limiter / auto-leveler. Plugin list filtered to the 8.
+- [x] **native→JS meters**: engine polls effect meter getters ~20Hz and pushes
+      to the matching plugin's `onMessage`. **LIVE: Auto Leveler LUFS graph
+      confirmed** (also Transient Shaper gain).
+- [ ] Remaining: Sub Synth / Multiband param normalizers; Spectrum Analyzer
+      waveform forwarding (needs an audio-buffer tap); Multiband/Brickwall meters;
+      presets filtered to the 8 supported effects.
 - [ ] Presets filtered to the 8 effects (graceful skip of unknown names in
       `js/preset-manager.js`).
 - [ ] E2E: latency (loopback @64/128), live chain audio, RT param updates, preset
