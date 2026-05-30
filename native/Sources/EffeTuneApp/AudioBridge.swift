@@ -289,16 +289,21 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
             }
             if let m = meas { list.append(["id": id, "measurements": m]) }
         }
-        guard !list.isEmpty,
-              let data = try? JSONSerialization.data(withJSONObject: list),
-              let json = String(data: data, encoding: .utf8) else { return }
+        guard !list.isEmpty else { return }
         let t0 = DispatchTime.now().uptimeNanoseconds
-        webView?.evaluateJavaScript("window.__effetuneOnMeters && window.__effetuneOnMeters(\(json));")
+        // Pass the payload as a JS ARGUMENT (WebKit marshals it natively) instead
+        // of embedding a ~90KB JSON string into JS source every frame — that made
+        // JSC re-parse megabytes/sec of source. callAsyncJavaScript hands `data`
+        // over as a real object, so there's no Swift JSON-encode + no JS re-parse.
+        webView?.callAsyncJavaScript(
+            "window.__effetuneOnMeters && window.__effetuneOnMeters(data);",
+            arguments: ["data": list],
+            in: nil, in: .page, completionHandler: nil)
         let evalUs = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1000.0
         meterTick += 1
         if meterTick % 60 == 1 {
             let ids = list.map { ($0["id"] as? String) ?? "?" }.joined(separator: ",")
-            nlog(String(format: "pushMeters: %d item(s) ids=[%@] bytes=%d evalJS=%.1fµs", list.count, ids, data.count, evalUs))
+            nlog(String(format: "pushMeters: %d item(s) ids=[%@] dispatch=%.1fµs", list.count, ids, evalUs))
         }
     }
 
