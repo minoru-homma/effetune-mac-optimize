@@ -737,6 +737,16 @@ class App {
             console.log('Audio pipeline rebuilt after error');
         }
 
+        // Native host: apply saved panel open/close state. Restore expands all
+        // plugins by default; collapse those the saved state marked collapsed.
+        if (window.__effetuneNativeHost && savedState && Array.isArray(savedState.pipelineA)) {
+            const pA = this.audioManager.pipelineA || [];
+            savedState.pipelineA.forEach((st, i) => {
+                if (st && st.collapsed && pA[i]) this.uiManager.expandedPlugins.delete(pA[i]);
+            });
+            this.uiManager.updatePipelineUI(true);
+        }
+
         // Startup pipeline is built; allow native auto-save now. (Gating until
         // here prevents the initial empty pipeline from overwriting the restored
         // state on the native host.)

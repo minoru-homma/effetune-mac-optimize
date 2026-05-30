@@ -174,11 +174,14 @@ class NativeBridge {
       const core = window.pipelineManager?.core;
       const am = window.audioManager;
       if (!core || !am) return;
-      const serialize = (pl) => (pl ? pl.map((p) => core.getSerializablePluginState(p, false, false, false)) : null);
-      const stateA = serialize(am.pipelineA);
-      console.log('[native] saving pipeline state: ' + (stateA ? stateA.length : 0) + ' effect(s)');
+      const expanded = window.uiManager?.expandedPlugins;
+      const serialize = (pl) => (pl ? pl.map((p) => {
+        const s = core.getSerializablePluginState(p, false, false, false);
+        s.collapsed = expanded ? !expanded.has(p) : false; // persist panel open/close
+        return s;
+      }) : null);
       this.savePipelineState({
-        pipelineA: stateA,
+        pipelineA: serialize(am.pipelineA),
         pipelineB: serialize(am.pipelineB),
         currentPipeline: am.currentPipeline,
       });
