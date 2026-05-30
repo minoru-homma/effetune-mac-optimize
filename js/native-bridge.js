@@ -69,7 +69,9 @@ function normalize(plugin) {
       return { id, type, enabled, payload: { pt: p.pt } };
 
     case 'LevelMeterPlugin':
-      // Display-only; native taps audio and sends per-channel peaks.
+    case 'OscilloscopePlugin':
+    case 'StereoMeterPlugin':
+      // Display-only; native taps audio and sends the analyzer's data shape.
       return { id, type, enabled, payload: {} };
 
     default:

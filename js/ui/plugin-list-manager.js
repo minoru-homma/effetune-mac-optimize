@@ -11,7 +11,7 @@ const NATIVE_SUPPORTED_EFFECTS = new Set([
     'SubSynthPlugin', 'AutoLevelerPlugin', 'BrickwallLimiterPlugin',
     'MultibandCompressorPlugin', 'SpectrumAnalyzerPlugin',
     // Display-only JS analyzers (native taps audio; no Rust DSP):
-    'LevelMeterPlugin', 'SpectrogramPlugin',
+    'LevelMeterPlugin', 'SpectrogramPlugin', 'OscilloscopePlugin', 'StereoMeterPlugin',
 ]);
 
 export class PluginListManager {

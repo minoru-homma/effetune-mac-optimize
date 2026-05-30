@@ -198,6 +198,19 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
                 let window = max(1, Int(engine.sampleRate / 30.0))
                 meas = ["channels": e.channelPeaks(window: window).map { ["peak": Double($0)] },
                         "time": time]
+            case "OscilloscopePlugin":
+                if let mr = e.monoRingSnapshot() {
+                    meas = ["buffer": mr.buffer,
+                            "triggerIndex": e.oscilloscopeTriggerIndex(autoSec: 0.1),
+                            "currentPosition": mr.position,
+                            "sampleRate": engine.sampleRate, "time": time]
+                }
+            case "StereoMeterPlugin":
+                if let s = e.stereoSnapshot(window: 8192) {
+                    meas = ["xBuffer": s.x, "yBuffer": s.y, "peakBuffer": s.peak,
+                            "currentPosition": s.position,
+                            "sampleRate": engine.sampleRate, "time": time]
+                }
             default:
                 if var m = e.meters() { m["time"] = time; meas = m }
             }

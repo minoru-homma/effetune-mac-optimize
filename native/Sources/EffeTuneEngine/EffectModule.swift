@@ -30,6 +30,8 @@ public struct EffectKind {
         // Display-only JS analyzers (no Rust): native taps the audio, JS renders.
         EffectKind(id: "LevelMeterPlugin",          dylib: "",                              family: .jsTap,      channels: 8),
         EffectKind(id: "SpectrogramPlugin",         dylib: "",                              family: .jsTap,      channels: 2),
+        EffectKind(id: "OscilloscopePlugin",        dylib: "",                              family: .jsTap,      channels: 8),
+        EffectKind(id: "StereoMeterPlugin",         dylib: "",                              family: .jsTap,      channels: 2),
     ]
 
     public static func find(_ id: String) -> EffectKind? { all.first { $0.id == id } }
@@ -227,6 +229,59 @@ public final class EffectModule {
             out[i] = v.isFinite ? v : 0
         }
         return out
+    }
+
+    /// The full per-sample mono ring (ring order) + write head, for the
+    /// Oscilloscope, which indexes the ring by absolute position.
+    public func monoRingSnapshot() -> (buffer: [Float], position: Int)? {
+        guard !tapCh.isEmpty else { return nil }
+        let inv = 1.0 / Float(tapCh.count)
+        var out = [Float](repeating: 0, count: tapMax)
+        for i in 0..<tapMax {
+            var s: Float = 0
+            for ring in tapCh { s += ring[i] }
+            let v = s * inv
+            out[i] = v.isFinite ? v : 0
+        }
+        return (out, tapPos)
+    }
+
+    // Oscilloscope auto-sweep trigger: a fresh trigger index every `autoSec`.
+    private var oscTriggerIndex = 0
+    private var oscLastTriggerSample = -1 << 30
+    public func oscilloscopeTriggerIndex(autoSec: Double) -> Int {
+        let span = max(1, Int(sampleRate * autoSec))
+        if spectrumPosition - oscLastTriggerSample >= span {
+            oscTriggerIndex = tapPos
+            oscLastTriggerSample = spectrumPosition
+        }
+        return oscTriggerIndex
+    }
+
+    /// Stereo Meter data over the last `window` samples: x=R-L, y=L+R Lissajous
+    /// plus a 360-bin angle peak histogram (peak-over-window; decay is implicit).
+    public func stereoSnapshot(window: Int) -> (x: [Float], y: [Float], peak: [Float], position: Int)? {
+        guard !tapCh.isEmpty else { return nil }
+        let n = min(max(window, 1), tapMax)
+        let left = tapCh[0]
+        let right = tapCh.count > 1 ? tapCh[1] : tapCh[0]
+        let start = ringStart(n)
+        var x = [Float](repeating: 0, count: n)
+        var y = [Float](repeating: 0, count: n)
+        var peak = [Float](repeating: 0, count: 360)
+        let radToDeg: Float = 180.0 / .pi
+        for i in 0..<n {
+            let idx = (start + i) % tapMax
+            let l = left[idx], r = right[idx]
+            let xv = r - l, yv = l + r
+            x[i] = xv.isFinite ? xv : 0
+            y[i] = yv.isFinite ? yv : 0
+            let angle = -atan2(yv, xv) * radToDeg
+            let bin = ((Int(angle.rounded()) % 360) + 360) % 360
+            let mag = (xv * xv + yv * yv).squareRoot()
+            if mag.isFinite && mag > peak[bin] { peak[bin] = mag }
+        }
+        return (x, y, peak, n - 1)
     }
 
     /// Per-channel peak (linear) over the last `window` samples. For Level Meter.
