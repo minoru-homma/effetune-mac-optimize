@@ -221,12 +221,13 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
         } ?? false
     }
 
-    /// Push meters at 60 Hz to match the 60fps draw loop (smooth). The timer runs
-    /// while any analyzer is visible OR a scalar-meter effect is present; else idle.
+    /// Push meters at 30 Hz (visually smooth enough; 60 Hz doubled the main-thread
+    /// JSON/evaluateJavaScript cost for little benefit). The timer runs while any
+    /// analyzer is visible OR a scalar-meter effect is present; else it idles.
     private func updateMeterTimer() {
         let shouldRun = !activeIds.isEmpty || hasScalarMeter()
         if shouldRun && meterTimer == nil {
-            let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in self?.pushMeters() }
+            let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in self?.pushMeters() }
             RunLoop.main.add(timer, forMode: .common)
             meterTimer = timer
             nlog("meter timer started (active=\(activeIds.count))")

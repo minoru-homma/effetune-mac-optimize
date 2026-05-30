@@ -235,12 +235,16 @@ public final class CoreAudioEngine {
         let avail = (w - r + ringFrames) % ringFrames
         let free = ringFrames - 1 - avail
         if free < n { return noErr } // overrun: drop
-        for i in 0..<n {
-            let pos = (w + i) % ringFrames
-            // Up-mix capture channels to engine channels (mono mic -> both).
-            for c in 0..<channels {
-                let src = min(c, inputChannels - 1)
-                ring[c][pos] = cap[src * maxFrames + i]
+        // Chunked copy (≤2 segments around the ring wrap) instead of a per-sample
+        // modulo loop — far cheaper on the RT thread. Up-mix maps each engine
+        // channel to its source capture channel (mono mic -> all engine channels).
+        let start = w % ringFrames
+        let first = min(n, ringFrames - start)
+        for c in 0..<channels {
+            let srcBase = cap + min(c, inputChannels - 1) * maxFrames
+            ring[c].advanced(by: start).update(from: srcBase, count: first)
+            if first < n {
+                ring[c].update(from: srcBase + first, count: n - first)
             }
         }
         os_unfair_lock_lock(&idxLock)
@@ -261,9 +265,15 @@ public final class CoreAudioEngine {
         let avail = (w - r + ringFrames) % ringFrames
 
         if avail >= nn {
-            for i in 0..<nn {
-                let pos = (r + i) % ringFrames
-                for c in 0..<channels { scratch[c * nn + i] = ring[c][pos] }
+            // Chunked copy (≤2 segments) per channel instead of per-sample modulo.
+            let start = r % ringFrames
+            let first = min(nn, ringFrames - start)
+            for c in 0..<channels {
+                let dst = scratch + c * nn
+                dst.update(from: ring[c].advanced(by: start), count: first)
+                if first < nn {
+                    (dst + first).update(from: ring[c], count: nn - first)
+                }
             }
             os_unfair_lock_lock(&idxLock)
             readIdx = (readIdx + nn) % ringFrames
