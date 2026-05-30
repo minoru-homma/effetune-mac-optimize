@@ -308,8 +308,8 @@ public final class CoreAudioEngine {
         procTimeAccum += Double(procEnd - procStart)
         cbTimeAccum += Double(cbEnd - cbStart)
         timedFrames += nn
-        if outCount % 500 == 0 {
-            let blocks = 500.0
+        if outCount % 3000 == 0 {
+            let blocks = 3000.0
             let avgCb = cbTimeAccum / blocks / 1000.0      // µs
             let avgProc = procTimeAccum / blocks / 1000.0  // µs
             let blockSec = Double(timedFrames) / blocks / sampleRate

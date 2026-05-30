@@ -292,12 +292,14 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
         guard !list.isEmpty,
               let data = try? JSONSerialization.data(withJSONObject: list),
               let json = String(data: data, encoding: .utf8) else { return }
-        meterTick += 1
-        if meterTick % 40 == 1 {
-            let ids = list.map { ($0["id"] as? String) ?? "?" }.joined(separator: ",")
-            nlog("pushMeters: \(list.count) item(s) ids=[\(ids)] bytes=\(data.count)")
-        }
+        let t0 = DispatchTime.now().uptimeNanoseconds
         webView?.evaluateJavaScript("window.__effetuneOnMeters && window.__effetuneOnMeters(\(json));")
+        let evalUs = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1000.0
+        meterTick += 1
+        if meterTick % 60 == 1 {
+            let ids = list.map { ($0["id"] as? String) ?? "?" }.joined(separator: ",")
+            nlog(String(format: "pushMeters: %d item(s) ids=[%@] bytes=%d evalJS=%.1fµs", list.count, ids, data.count, evalUs))
+        }
     }
 
     /// Push the CoreAudio device list to the renderer (window.__effetuneOnDevices).
