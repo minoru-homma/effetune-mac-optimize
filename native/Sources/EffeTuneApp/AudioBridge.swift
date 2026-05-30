@@ -28,7 +28,6 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
     private var bufferFrames = 128
     public weak var webView: WKWebView?
     private var meterTimer: Timer?
-    private var meterTick = 0
     // Plugin ids of analyzers whose UI is currently visible (expanded + on-screen).
     // Only these get snapshots/pushes; the meter timer idles when this is empty.
     private var activeIds: Set<String> = []
@@ -290,7 +289,6 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
             if let m = meas { list.append(["id": id, "measurements": m]) }
         }
         guard !list.isEmpty else { return }
-        let t0 = DispatchTime.now().uptimeNanoseconds
         // Pass the payload as a JS ARGUMENT (WebKit marshals it natively) instead
         // of embedding a ~90KB JSON string into JS source every frame — that made
         // JSC re-parse megabytes/sec of source. callAsyncJavaScript hands `data`
@@ -299,12 +297,6 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
             "window.__effetuneOnMeters && window.__effetuneOnMeters(data);",
             arguments: ["data": list],
             in: nil, in: .page, completionHandler: nil)
-        let evalUs = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1000.0
-        meterTick += 1
-        if meterTick % 60 == 1 {
-            let ids = list.map { ($0["id"] as? String) ?? "?" }.joined(separator: ",")
-            nlog(String(format: "pushMeters: %d item(s) ids=[%@] dispatch=%.1fµs", list.count, ids, evalUs))
-        }
     }
 
     /// Push the CoreAudio device list to the renderer (window.__effetuneOnDevices).

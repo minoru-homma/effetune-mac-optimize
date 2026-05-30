@@ -44,9 +44,6 @@ public final class CoreAudioEngine {
     // Diagnostics (RT-incremented, logged periodically off the hot path).
     private var inCount = 0, outCount = 0, underruns = 0, inErrors = 0
     private var lastInErr: OSStatus = 0
-    // RT timing: accumulate total output-callback time and chain-process time
-    // over a window, log the per-callback averages periodically.
-    private var procTimeAccum: Double = 0, cbTimeAccum: Double = 0, timedFrames = 0
 
     // Input-capture scratch + buffer list (planar).
     private var capture: UnsafeMutableBufferPointer<Float>?
@@ -257,7 +254,6 @@ public final class CoreAudioEngine {
     }
 
     fileprivate func renderOutput(_ frames: UInt32, _ ioData: UnsafeMutablePointer<AudioBufferList>?) -> OSStatus {
-        let cbStart = DispatchTime.now().uptimeNanoseconds
         guard let outList = ioData, let scratch = outScratch?.baseAddress else { return noErr }
         let nn = min(Int(frames), maxFrames)
         // Tightly pack per-channel data with stride = nn (the layout the Rust
@@ -289,33 +285,11 @@ public final class CoreAudioEngine {
         }
 
         outCount += 1
-        if outCount <= 2 || outCount % 500 == 0 {
-            nlog("output cb #\(outCount) frames=\(frames): avail=\(avail) underruns=\(underruns) inCb=\(inCount) inErr=\(inErrors)")
-        }
-
-        let procStart = DispatchTime.now().uptimeNanoseconds
         chain?.process(scratch, frames: nn)
-        let procEnd = DispatchTime.now().uptimeNanoseconds
 
         let out = UnsafeMutableAudioBufferListPointer(outList)
         for c in 0..<min(channels, out.count) {
             if let dst = out[c].mData { dst.copyMemory(from: scratch + c * nn, byteCount: nn * 4) }
-        }
-
-        // RT timing: report average callback / chain-process microseconds and the
-        // implied DSP duty cycle (process time ÷ available block time) per window.
-        let cbEnd = DispatchTime.now().uptimeNanoseconds
-        procTimeAccum += Double(procEnd - procStart)
-        cbTimeAccum += Double(cbEnd - cbStart)
-        timedFrames += nn
-        if outCount % 3000 == 0 {
-            let blocks = 3000.0
-            let avgCb = cbTimeAccum / blocks / 1000.0      // µs
-            let avgProc = procTimeAccum / blocks / 1000.0  // µs
-            let blockSec = Double(timedFrames) / blocks / sampleRate
-            let duty = (procTimeAccum / 1e9) / (blockSec * blocks) * 100.0
-            nlog(String(format: "RT timing: cb=%.1fµs proc=%.1fµs duty=%.1f%% (sr=%.0f)", avgCb, avgProc, duty, sampleRate))
-            procTimeAccum = 0; cbTimeAccum = 0; timedFrames = 0
         }
         return noErr
     }
