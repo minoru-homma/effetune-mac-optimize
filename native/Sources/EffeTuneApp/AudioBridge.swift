@@ -52,6 +52,8 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
         case "showOpenDialog":  handleOpenDialog(dict)
         case "saveFile":        handleSaveFile(dict)
         case "readFile":        handleReadFile(dict)
+        case "saveAppState":    handleSaveAppState(dict)
+        case "loadAppState":    handleLoadAppState(dict)
         case "stop":
             meterTimer?.invalidate(); meterTimer = nil
             engine.stop()
@@ -142,6 +144,32 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
         } catch {
             reply(reqId, ["success": false, "error": error.localizedDescription])
         }
+    }
+
+    // Persisted pipeline state path: ~/Library/Application Support/EffeTune/pipeline-state.json
+    private func appStatePath() -> String? {
+        guard let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
+        let appDir = dir.appendingPathComponent("EffeTune", isDirectory: true)
+        try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
+        return appDir.appendingPathComponent("pipeline-state.json").path
+    }
+
+    private func handleSaveAppState(_ dict: [String: Any]) {
+        let reqId = dict["reqId"] as? Int ?? 0
+        guard let path = appStatePath(), let content = dict["content"] as? String else {
+            reply(reqId, ["success": false]); return
+        }
+        do { try content.write(toFile: path, atomically: true, encoding: .utf8); reply(reqId, ["success": true]) }
+        catch { reply(reqId, ["success": false, "error": error.localizedDescription]) }
+    }
+
+    private func handleLoadAppState(_ dict: [String: Any]) {
+        let reqId = dict["reqId"] as? Int ?? 0
+        guard let path = appStatePath(), FileManager.default.fileExists(atPath: path),
+              let content = try? String(contentsOfFile: path, encoding: .utf8) else {
+            reply(reqId, ["success": false]); return
+        }
+        reply(reqId, ["success": true, "content": content])
     }
 
     // plugin.id may arrive as a JSON number or string; normalize to String.

@@ -58,6 +58,16 @@ if (window.electronAPI && window.electronAPI.onRequestPipelineStateForClose) {
 
 // Function to load pipeline state from file when in Electron environment
 async function loadPipelineState() {
+    // Native host: restore the last pipeline state saved to Application Support.
+    if (window.__effetuneNativeHost && window.nativeBridge) {
+        try {
+            const res = await window.nativeBridge.loadPipelineState();
+            return (res && res.success && res.content) ? JSON.parse(res.content) : null;
+        } catch (error) {
+            console.error('Error loading native pipeline state:', error);
+            return null;
+        }
+    }
     if (!window.electronAPI || !window.electronIntegration || !window.electronIntegration.isElectron) {
         return null;
     }
@@ -570,7 +580,7 @@ class App {
             ? window.ORIGINAL_PIPELINE_STATE_LOADED === true
             : window.pipelineStateLoaded === true;
             
-        if (isElectron && shouldLoadPipeline) {
+        if ((isElectron && shouldLoadPipeline) || window.__effetuneNativeHost) {
             try {
                 savedState = await loadPipelineState();
             } catch (error) {

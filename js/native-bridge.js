@@ -148,11 +148,36 @@ class NativeBridge {
   // Structural change (add/remove/reorder/preset load): rebuild the native chain.
   setPipeline(pipeline) {
     this.post({ cmd: 'setPipeline', channels: this.channels, dspDir: this.dspDir, effects: this.effects(pipeline) });
+    this.saveStateDebounced();
   }
 
   // Parameter change (slider drag): apply in place, preserving DSP state.
   updateParams(pipeline) {
     this.post({ cmd: 'updateParams', effects: this.effects(pipeline) });
+    this.saveStateDebounced();
+  }
+
+  // --- Persisted pipeline state (restored on next launch) ---
+  loadPipelineState() { return this._request('loadAppState', {}); }
+  savePipelineState(state) { return this._request('saveAppState', { content: JSON.stringify(state) }); }
+
+  // Debounced auto-save of the full serialized pipeline on any change.
+  saveStateDebounced() {
+    clearTimeout(this._saveTimer);
+    this._saveTimer = setTimeout(() => this._doSaveState(), 800);
+  }
+  _doSaveState() {
+    try {
+      const core = window.pipelineManager?.core;
+      const am = window.audioManager;
+      if (!core || !am) return;
+      const serialize = (pl) => (pl ? pl.map((p) => core.getSerializablePluginState(p, false, false, false)) : null);
+      this.savePipelineState({
+        pipelineA: serialize(am.pipelineA),
+        pipelineB: serialize(am.pipelineB),
+        currentPipeline: am.currentPipeline,
+      });
+    } catch (_) { /* best effort */ }
   }
 }
 
