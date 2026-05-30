@@ -174,6 +174,13 @@ public final class EffectModule {
         }
     }
 
+    /// Multiband Compressor per-band gain reduction (5 values), or nil.
+    public func multibandGainReductions() -> [Float]? {
+        guard kind.id == "MultibandCompressorPlugin", let s = symbol("gain_reductions_ptr") else { return nil }
+        guard let p = unsafeBitCast(s, to: FnPtr.self)(state) else { return nil }
+        return (0..<5).map { p[$0].isFinite ? p[$0] : 0 }
+    }
+
     /// Process `frames` of planar (channel-major, stride = frames) audio in place.
     public func process(_ buf: UnsafeMutablePointer<Float>, frames: Int) {
         let n = channels * frames

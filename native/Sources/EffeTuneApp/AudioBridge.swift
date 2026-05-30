@@ -211,6 +211,10 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
                             "currentPosition": s.position,
                             "sampleRate": engine.sampleRate, "time": time]
                 }
+            case "MultibandCompressorPlugin":
+                if let gr = e.multibandGainReductions() {
+                    meas = ["gainReductions": gr, "time": time]
+                }
             default:
                 if var m = e.meters() { m["time"] = time; meas = m }
             }
