@@ -10,6 +10,8 @@
     <string>com.frieve.effetune.native</string>
     <key>CFBundleExecutable</key>
     <string>EffeTuneApp</string>
+    <key>CFBundleIconFile</key>
+    <string>icon.icns</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

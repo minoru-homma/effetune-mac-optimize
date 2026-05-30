@@ -51,3 +51,4 @@ wasm-src/**/target/
 native/dsp/*.dylib
 native/tools/verify_dsp
 native/.build/
+native/app/icon.icns
