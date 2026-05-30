@@ -70,13 +70,17 @@ public final class EffectModule {
     private let maxBlock: Int
 
     // Per-channel audio tap (analyzer + jsTap). Fixed max ring so changing the
-    // analysis window never reallocates under the RT writer.
-    private let tapMax = 32768
+    // analysis window never reallocates under the RT writer. 16384 covers the
+    // Oscilloscope's max window (0.1s × 96kHz = 9600 samples).
+    private let tapMax = 16384
     private var tapCh: [UnsafeMutablePointer<Float>] = []
     private var tapPos = 0
     public var spectrumWindow = 4096   // mono-FFT window for Spectrum/Spectrogram
     public var spectrumPosition = 0    // running counter (measurements.bufferPosition)
     private var nanLogged = false
+    /// When false, the RT audio tap is skipped (analyzer not visible) — audio
+    /// still passes through untouched. Toggled by the bridge per visibility.
+    public var tapActive = true
 
     public init?(kind: EffectKind, dspDir: String, sampleRate: Double, channels: Int, maxBlock: Int) {
         self.kind = kind

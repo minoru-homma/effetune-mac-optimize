@@ -560,6 +560,7 @@ class OscilloscopePlugin extends PluginBase {
             this.drawWaveform();
             this.animationFrameId = requestAnimationFrame(animate);
         };
+        if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, true);
         animate();
     }
 
@@ -568,6 +569,7 @@ class OscilloscopePlugin extends PluginBase {
             cancelAnimationFrame(this.animationFrameId);
             this.animationFrameId = null;
         }
+        if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, false);
     }
     // ---------------------------
     // drawWaveform: Render grid and waveform.
