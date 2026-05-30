@@ -137,7 +137,8 @@ if (isNativeHost && typeof window !== 'undefined') {
     if (!Array.isArray(list) || !window.audioManager?.pipeline) return;
     const pipeline = window.audioManager.pipeline;
     for (const item of list) {
-      const plugin = pipeline.find((p) => p.id === item.id);
+      // native sends id as a string; plugin.id is numeric — compare loosely.
+      const plugin = pipeline.find((p) => String(p.id) === String(item.id));
       if (plugin && typeof plugin.onMessage === 'function') {
         plugin.onMessage({ type: 'processBuffer', pluginId: item.id, measurements: item.measurements });
       }

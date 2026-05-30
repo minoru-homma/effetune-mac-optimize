@@ -71,6 +71,13 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
+    // plugin.id may arrive as a JSON number or string; normalize to String.
+    private func idString(_ v: Any?) -> String? {
+        if let n = v as? NSNumber { return n.stringValue }
+        if let s = v as? String { return s }
+        return nil
+    }
+
     private func applyDeviceConfig(_ dict: [String: Any]) {
         if let dir = dict["dspDir"] as? String { dspDir = dir }
         sampleRate = (dict["sampleRate"] as? Double) ?? sampleRate
@@ -139,7 +146,7 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
                                        maxBlock: maxBlock)
             else { continue }
             m.enabled = (desc["enabled"] as? Bool) ?? true
-            m.pluginId = desc["id"] as? String
+            m.pluginId = idString(desc["id"]) // plugin.id is numeric in JS
             apply(desc, to: m)
             chain.append(m)
         }
