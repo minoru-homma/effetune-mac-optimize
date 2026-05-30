@@ -116,8 +116,14 @@ EFFETUNE_WEBROOT="$(pwd)" open native/.build/EffeTune.app
       to Float32Array on the JS side to match worklet semantics.
 - [x] **Preset file load/save** via NSOpen/NSSavePanel + native file IO
       (File ▸ Import/Export Preset). Prefs persist in localStorage.
-- [ ] Remaining: Multiband / Brickwall gain-reduction meters (their `onMessage`
-      differs); presets that reference unsupported effects should skip gracefully.
+- [x] **Multiband Compressor gain-reduction meter** (5-band, via
+      `gain_reductions_ptr`). Brickwall has no GR meter UI, so nothing to drive.
+- [x] **Startup restore**: the pipeline auto-saves (debounced) to
+      `~/Library/Application Support/EffeTune/pipeline-state.json` and is restored
+      on next launch (gated so the initial empty pipeline can't overwrite it).
+- [ ] Remaining (optional): presets/state that reference unsupported effects
+      already skip per-plugin (createPlugin try/catch); could add an explicit
+      user-facing notice.
 
 > Supported effects = the 8 Rust DSP modules + 5 display-only analyzers
 > (Spectrum/Level/Spectrogram/Oscilloscope/Stereo). Other JS DSP effects remain
