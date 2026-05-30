@@ -2,6 +2,7 @@
  * Preset and file integration module for EffeTune
  * Provides preset and file handling functionality when running in Electron
  */
+import { isNativeHost, nativeBridge } from '../native-bridge.js';
 
 // Import path module for file operations
 const path = window.require ? window.require('path') : { basename: (p, ext) => p.split('/').pop().replace(ext, '') };
@@ -221,13 +222,27 @@ export async function openPresetFile(isElectron, filePath) {
  * @param {boolean} isElectron - Whether running in Electron environment
  */
 export async function exportPreset(isElectron) {
-  if (!isElectron || !window.uiManager) return;
+  if ((!isElectron && !isNativeHost) || !window.uiManager) return;
 
   try {
     // Get current preset data
     const presetData = window.uiManager.getCurrentPresetData();
     if (!presetData) {
       console.error('No preset data available');
+      return;
+    }
+
+    // Native host: NSSavePanel + write via the bridge.
+    if (isNativeHost) {
+      const res = await nativeBridge.showSaveDialog({
+        title: 'Export Preset',
+        defaultName: `${presetData.name || 'preset'}.effetune_preset`,
+        ext: 'effetune_preset',
+      });
+      if (res.canceled || !res.filePath) return;
+      const { name, ...presetDataWithoutName } = presetData;
+      const saveResult = await nativeBridge.saveFile(res.filePath, JSON.stringify(presetDataWithoutName, null, 2));
+      if (!saveResult.success) console.error('Failed to save preset:', saveResult.error);
       return;
     }
 
@@ -265,24 +280,30 @@ export async function exportPreset(isElectron) {
  * @param {boolean} isElectron - Whether running in Electron environment
  */
 export async function importPreset(isElectron) {
-  if (!isElectron || !window.uiManager) return;
+  if ((!isElectron && !isNativeHost) || !window.uiManager) return;
 
   try {
-    // Show open dialog
-    const result = await window.electronAPI.showOpenDialog({
-      title: 'Import Preset',
-      filters: [
-        { name: 'EffeTune Preset Files', extensions: ['effetune_preset'] },
-        { name: 'All Files', extensions: ['*'] }
-      ],
-      properties: ['openFile']
-    });
+    // Show open dialog + read file (native NSOpenPanel or Electron dialog).
+    let result, readResult;
+    if (isNativeHost) {
+      result = await nativeBridge.showOpenDialog({ title: 'Import Preset', ext: 'effetune_preset' });
+      if (result.canceled || !result.filePaths || result.filePaths.length === 0) return;
+      readResult = await nativeBridge.readFile(result.filePaths[0]);
+    } else {
+      result = await window.electronAPI.showOpenDialog({
+        title: 'Import Preset',
+        filters: [
+          { name: 'EffeTune Preset Files', extensions: ['effetune_preset'] },
+          { name: 'All Files', extensions: ['*'] }
+        ],
+        properties: ['openFile']
+      });
 
-    if (result.canceled || !result.filePaths || result.filePaths.length === 0) return;
+      if (result.canceled || !result.filePaths || result.filePaths.length === 0) return;
 
-    // Read file
-    const readResult = await window.electronAPI.readFile(result.filePaths[0]);
-    
+      readResult = await window.electronAPI.readFile(result.filePaths[0]);
+    }
+
     if (!readResult.success) {
       console.error('Failed to read preset:', readResult.error);
       return;

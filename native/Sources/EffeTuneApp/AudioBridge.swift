@@ -1,6 +1,8 @@
 import Foundation
 import WebKit
 import EffeTuneEngine
+import AppKit
+import UniformTypeIdentifiers
 
 import QuartzCore
 
@@ -46,6 +48,10 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
             // Reconfigure devices/format and restart; JS resends the pipeline after.
             applyDeviceConfig(dict)
             startEngine()
+        case "showSaveDialog":  handleSaveDialog(dict)
+        case "showOpenDialog":  handleOpenDialog(dict)
+        case "saveFile":        handleSaveFile(dict)
+        case "readFile":        handleReadFile(dict)
         case "stop":
             meterTimer?.invalidate(); meterTimer = nil
             engine.stop()
@@ -69,6 +75,72 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
             }
         default:
             break
+        }
+    }
+
+    // MARK: file dialogs / IO (preset import/export). Async request/reply: JS
+    // posts {cmd, reqId, ...}; native answers window.__effetuneReply(reqId, result).
+
+    private func reply(_ reqId: Int, _ obj: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: obj),
+              let json = String(data: data, encoding: .utf8) else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.webView?.evaluateJavaScript("window.__effetuneReply && window.__effetuneReply(\(reqId), \(json));")
+        }
+    }
+
+    private func contentType(_ ext: String?) -> [UTType] {
+        if let e = ext, let t = UTType(filenameExtension: e) { return [t] }
+        return []
+    }
+
+    private func handleSaveDialog(_ dict: [String: Any]) {
+        let reqId = dict["reqId"] as? Int ?? 0
+        let panel = NSSavePanel()
+        panel.title = dict["title"] as? String ?? "Save"
+        if let name = dict["defaultName"] as? String { panel.nameFieldStringValue = name }
+        panel.allowedContentTypes = contentType(dict["ext"] as? String)
+        if panel.runModal() == .OK, let url = panel.url {
+            reply(reqId, ["canceled": false, "filePath": url.path])
+        } else { reply(reqId, ["canceled": true]) }
+    }
+
+    private func handleOpenDialog(_ dict: [String: Any]) {
+        let reqId = dict["reqId"] as? Int ?? 0
+        let panel = NSOpenPanel()
+        panel.title = dict["title"] as? String ?? "Open"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = contentType(dict["ext"] as? String)
+        if panel.runModal() == .OK {
+            reply(reqId, ["canceled": false, "filePaths": panel.urls.map { $0.path }])
+        } else { reply(reqId, ["canceled": true, "filePaths": []]) }
+    }
+
+    private func handleSaveFile(_ dict: [String: Any]) {
+        let reqId = dict["reqId"] as? Int ?? 0
+        guard let path = dict["path"] as? String, let content = dict["content"] as? String else {
+            reply(reqId, ["success": false, "error": "missing path/content"]); return
+        }
+        do {
+            try content.write(toFile: path, atomically: true, encoding: .utf8)
+            reply(reqId, ["success": true])
+        } catch {
+            reply(reqId, ["success": false, "error": error.localizedDescription])
+        }
+    }
+
+    private func handleReadFile(_ dict: [String: Any]) {
+        let reqId = dict["reqId"] as? Int ?? 0
+        guard let path = dict["path"] as? String else {
+            reply(reqId, ["success": false, "error": "missing path"]); return
+        }
+        do {
+            let content = try String(contentsOfFile: path, encoding: .utf8)
+            reply(reqId, ["success": true, "content": content])
+        } catch {
+            reply(reqId, ["success": false, "error": error.localizedDescription])
         }
     }
 

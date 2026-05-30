@@ -72,6 +72,10 @@ function normalize(plugin) {
   }
 }
 
+// Async request/reply bookkeeping for native file dialogs / IO.
+let _reqCounter = 0;
+const _pendingRequests = {};
+
 class NativeBridge {
   constructor() {
     this.dspDir = null; // native resolves from its bundle; left null unless overridden
@@ -115,6 +119,19 @@ class NativeBridge {
 
   stop() { this.post({ cmd: 'stop' }); }
 
+  // Async request/reply (file dialogs + IO). Native answers via __effetuneReply.
+  _request(cmd, args) {
+    return new Promise((resolve) => {
+      const reqId = ++_reqCounter;
+      _pendingRequests[reqId] = resolve;
+      this.post({ cmd, reqId, ...args });
+    });
+  }
+  showSaveDialog(opts) { return this._request('showSaveDialog', opts); }
+  showOpenDialog(opts) { return this._request('showOpenDialog', opts); }
+  saveFile(path, content) { return this._request('saveFile', { path, content }); }
+  readFile(path) { return this._request('readFile', { path }); }
+
   // All supported effects (enabled flag carried in each desc; disabled ones are
   // kept as bypassed slots so JS and native indices stay aligned).
   effects(pipeline) {
@@ -137,6 +154,12 @@ export const nativeBridge = isNativeHost ? new NativeBridge() : null;
 // Expose to non-module code (e.g. plugins/plugin-base.js loaded via <script>).
 if (isNativeHost && typeof window !== 'undefined') {
   window.nativeBridge = nativeBridge;
+
+  // Native answers async requests (file dialogs / IO) here.
+  window.__effetuneReply = (reqId, result) => {
+    const cb = _pendingRequests[reqId];
+    if (cb) { delete _pendingRequests[reqId]; cb(result); }
+  };
 
   // Receive native meter pushes and route each to the matching plugin's
   // onMessage, shaped exactly like the worklet's 'processBuffer' message so the

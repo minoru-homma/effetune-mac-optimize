@@ -106,6 +106,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         appMenu.addItem(withTitle: "Quit EffeTune", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
 
+        let fileItem = NSMenuItem()
+        main.addItem(fileItem)
+        let fileMenu = NSMenu(title: "File")
+        let imp = NSMenuItem(title: "Import Preset…", action: #selector(importPreset), keyEquivalent: "o")
+        imp.target = self
+        fileMenu.addItem(imp)
+        let exp = NSMenuItem(title: "Export Preset…", action: #selector(exportPreset), keyEquivalent: "s")
+        exp.target = self
+        fileMenu.addItem(exp)
+        fileItem.submenu = fileMenu
+
         let audioItem = NSMenuItem()
         main.addItem(audioItem)
         let audioMenu = NSMenu(title: "Audio")
@@ -132,5 +143,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
 
     @objc private func openAudioConfig() {
         webView.evaluateJavaScript("window.__effetuneOpenAudioConfig && window.__effetuneOpenAudioConfig();")
+    }
+    @objc private func exportPreset() {
+        webView.evaluateJavaScript("window.electronIntegration && window.electronIntegration.exportPreset && window.electronIntegration.exportPreset();")
+    }
+    @objc private func importPreset() {
+        webView.evaluateJavaScript("window.electronIntegration && window.electronIntegration.importPreset && window.electronIntegration.importPreset();")
     }
 }
