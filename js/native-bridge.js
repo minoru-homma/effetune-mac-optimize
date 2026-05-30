@@ -64,8 +64,13 @@ function normalize(plugin) {
     }
 
     case 'SpectrumAnalyzerPlugin':
+    case 'SpectrogramPlugin':
       // Native taps a 2^pt time-domain window for the analyzer's own FFT.
       return { id, type, enabled, payload: { pt: p.pt } };
+
+    case 'LevelMeterPlugin':
+      // Display-only; native taps audio and sends per-channel peaks.
+      return { id, type, enabled, payload: {} };
 
     default:
       return null; // unsupported on native host

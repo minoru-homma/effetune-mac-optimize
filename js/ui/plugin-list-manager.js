@@ -10,6 +10,8 @@ const NATIVE_SUPPORTED_EFFECTS = new Set([
     'FifteenBandPEQPlugin', 'FiveBandPEQPlugin', 'TransientShaperPlugin',
     'SubSynthPlugin', 'AutoLevelerPlugin', 'BrickwallLimiterPlugin',
     'MultibandCompressorPlugin', 'SpectrumAnalyzerPlugin',
+    // Display-only JS analyzers (native taps audio; no Rust DSP):
+    'LevelMeterPlugin', 'SpectrogramPlugin',
 ]);
 
 export class PluginListManager {

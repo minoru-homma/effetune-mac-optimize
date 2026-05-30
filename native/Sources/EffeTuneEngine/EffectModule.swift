@@ -1,10 +1,13 @@
 import Foundation
 
-/// The three ABI families exposed by the 8 Rust DSP dylibs (see native/README.md).
+/// ABI families. The first three are Rust DSP dylibs; `jsTap` is a dylib-less
+/// display-only analyzer (Level Meter, Spectrogram, …) that taps the audio and
+/// lets its JS `onMessage` render — no native DSP.
 public enum EffectFamily {
     case io          // shared in-place buffer: io_ptr + process_block
     case splitInOut  // separate buffers: input_ptr/output_ptr + process_block
-    case analyzer    // read-only meter: input_ptr + analyze (no audio output)
+    case analyzer    // Rust analyzer (Spectrum); we tap audio for the JS FFT
+    case jsTap       // pure JS analyzer; native only taps the audio
 }
 
 /// Identity + ABI metadata for each effect. `id` matches the EffeTune plugin
@@ -24,6 +27,9 @@ public struct EffectKind {
         EffectKind(id: "BrickwallLimiterPlugin",    dylib: "libbrickwall_limiter.dylib",    family: .splitInOut, channels: 8),
         EffectKind(id: "MultibandCompressorPlugin", dylib: "libmultiband_compressor.dylib", family: .splitInOut, channels: 8),
         EffectKind(id: "SpectrumAnalyzerPlugin",    dylib: "libspectrum_analyzer.dylib",    family: .analyzer,   channels: 2),
+        // Display-only JS analyzers (no Rust): native taps the audio, JS renders.
+        EffectKind(id: "LevelMeterPlugin",          dylib: "",                              family: .jsTap,      channels: 8),
+        EffectKind(id: "SpectrogramPlugin",         dylib: "",                              family: .jsTap,      channels: 2),
     ]
 
     public static func find(_ id: String) -> EffectKind? { all.first { $0.id == id } }
@@ -39,27 +45,36 @@ private typealias FnFree          = @convention(c) (OpaquePointer?) -> Void
 private typealias FnPtr           = @convention(c) (OpaquePointer?) -> UnsafeMutablePointer<Float>?
 private typealias FnProcess       = @convention(c) (OpaquePointer?, UInt32) -> Void
 
-/// One loaded Rust DSP dylib + one live processing state. Loading each module as
-/// its own dlopen handle keeps the colliding symbol names (`init`, `process_block`
-/// …) in separate namespaces — no Rust source change needed.
+/// One effect instance. For dylib families it owns a dlopen handle + Rust state;
+/// for `.jsTap` it owns only a per-channel audio tap.
 public final class EffectModule {
     public let kind: EffectKind
     /// When false the chain passes audio through untouched (kept in the array so
     /// positions stay aligned with the JS pipeline for in-place param updates).
     public var enabled = true
-    private let handle: UnsafeMutableRawPointer
-    private var state: OpaquePointer?
+    public var pluginId: String?
 
-    private let freeFn: FnFree
-    private let processFn: FnProcess?      // nil for analyzer (uses analyzeFn)
-    private let analyzeFn: FnProcess?      // analyzer only
-    private let ioFn: FnPtr?               // io family
-    private let inputFn: FnPtr?            // split / analyzer
-    private let outputFn: FnPtr?           // split family
+    private let handle: UnsafeMutableRawPointer?
+    private var state: OpaquePointer?
+    private let freeFn: FnFree?
+    private let processFn: FnProcess?
+    private let analyzeFn: FnProcess?
+    private let ioFn: FnPtr?
+    private let inputFn: FnPtr?
+    private let outputFn: FnPtr?
 
     private let sampleRate: Double
     private let channels: Int
     private let maxBlock: Int
+
+    // Per-channel audio tap (analyzer + jsTap). Fixed max ring so changing the
+    // analysis window never reallocates under the RT writer.
+    private let tapMax = 32768
+    private var tapCh: [UnsafeMutablePointer<Float>] = []
+    private var tapPos = 0
+    public var spectrumWindow = 4096   // mono-FFT window for Spectrum/Spectrogram
+    public var spectrumPosition = 0    // running counter (measurements.bufferPosition)
+    private var nanLogged = false
 
     public init?(kind: EffectKind, dspDir: String, sampleRate: Double, channels: Int, maxBlock: Int) {
         self.kind = kind
@@ -67,78 +82,78 @@ public final class EffectModule {
         self.channels = min(channels, kind.channels)
         self.maxBlock = maxBlock
 
+        // Dylib-less analyzer: just a per-channel tap.
+        if kind.family == .jsTap {
+            handle = nil; freeFn = nil; state = nil
+            processFn = nil; analyzeFn = nil; ioFn = nil; inputFn = nil; outputFn = nil
+            allocateTap()
+            return
+        }
+
         let path = (dspDir as NSString).appendingPathComponent(kind.dylib)
         guard let h = dlopen(path, RTLD_NOW | RTLD_LOCAL) else {
             FileHandle.standardError.write(Data("dlopen failed for \(path): \(String(cString: dlerror()))\n".utf8))
             return nil
         }
-        self.handle = h
-
+        handle = h
         func sym(_ name: String) -> UnsafeMutableRawPointer? { dlsym(h, name) }
         guard let freePtr = sym("free_state") else { return nil }
-        self.freeFn = unsafeBitCast(freePtr, to: FnFree.self)
+        freeFn = unsafeBitCast(freePtr, to: FnFree.self)
 
         switch kind.family {
         case .io:
             guard let ip = sym("init"), let proc = sym("process_block"), let io = sym("io_ptr") else { return nil }
-            self.processFn = unsafeBitCast(proc, to: FnProcess.self)
-            self.ioFn = unsafeBitCast(io, to: FnPtr.self)
-            self.analyzeFn = nil; self.inputFn = nil; self.outputFn = nil
-            let initFn = unsafeBitCast(ip, to: FnInitIO.self)
-            self.state = initFn(Float(sampleRate), UInt32(self.channels), UInt32(maxBlock))
+            processFn = unsafeBitCast(proc, to: FnProcess.self)
+            ioFn = unsafeBitCast(io, to: FnPtr.self)
+            analyzeFn = nil; inputFn = nil; outputFn = nil
+            state = unsafeBitCast(ip, to: FnInitIO.self)(Float(sampleRate), UInt32(self.channels), UInt32(maxBlock))
         case .splitInOut:
             guard let ip = sym("init"), let proc = sym("process_block"),
                   let inp = sym("input_ptr"), let outp = sym("output_ptr") else { return nil }
-            self.processFn = unsafeBitCast(proc, to: FnProcess.self)
-            self.inputFn = unsafeBitCast(inp, to: FnPtr.self)
-            self.outputFn = unsafeBitCast(outp, to: FnPtr.self)
-            self.ioFn = nil; self.analyzeFn = nil
+            processFn = unsafeBitCast(proc, to: FnProcess.self)
+            inputFn = unsafeBitCast(inp, to: FnPtr.self)
+            outputFn = unsafeBitCast(outp, to: FnPtr.self)
+            ioFn = nil; analyzeFn = nil
             if kind.id == "MultibandCompressorPlugin" {
-                let initFn = unsafeBitCast(ip, to: FnInitMultiband.self)
-                self.state = initFn(Float(sampleRate), UInt32(self.channels), UInt32(maxBlock), 100, 500, 2000, 8000)
-            } else { // BrickwallLimiter: os_factor default 1 (no oversampling)
-                let initFn = unsafeBitCast(ip, to: FnInitLimiter.self)
-                self.state = initFn(Float(sampleRate), UInt32(self.channels), UInt32(maxBlock), 1)
+                state = unsafeBitCast(ip, to: FnInitMultiband.self)(Float(sampleRate), UInt32(self.channels), UInt32(maxBlock), 100, 500, 2000, 8000)
+            } else { // BrickwallLimiter: os_factor default 1
+                state = unsafeBitCast(ip, to: FnInitLimiter.self)(Float(sampleRate), UInt32(self.channels), UInt32(maxBlock), 1)
             }
         case .analyzer:
             guard let ip = sym("init"), let an = sym("analyze"), let inp = sym("input_ptr") else { return nil }
-            self.analyzeFn = unsafeBitCast(an, to: FnProcess.self)
-            self.inputFn = unsafeBitCast(inp, to: FnPtr.self)
-            self.processFn = nil; self.ioFn = nil; self.outputFn = nil
-            let initFn = unsafeBitCast(ip, to: FnInitAnalyzer.self)
-            self.state = initFn(12) // Rust init takes the FFT exponent (pt); 2^12 = 4096
-            let t = UnsafeMutableBufferPointer<Float>.allocate(capacity: tapMax)
-            t.initialize(repeating: 0); self.tap = t
+            analyzeFn = unsafeBitCast(an, to: FnProcess.self)
+            inputFn = unsafeBitCast(inp, to: FnPtr.self)
+            processFn = nil; ioFn = nil; outputFn = nil
+            state = unsafeBitCast(ip, to: FnInitAnalyzer.self)(12) // FFT exponent (2^12)
+            allocateTap()
+        case .jsTap:
+            return nil // handled above
         }
         if state == nil { return nil }
     }
 
-    deinit {
-        if let s = state { freeFn(s) }
-        tap?.deallocate()
-        dlclose(handle)
+    private func allocateTap() {
+        tapCh = (0..<channels).map { _ in
+            let p = UnsafeMutablePointer<Float>.allocate(capacity: tapMax)
+            p.initialize(repeating: 0, count: tapMax)
+            return p
+        }
     }
 
-    /// Resolve an arbitrary exported symbol for kind-specific param setters.
-    public func symbol(_ name: String) -> UnsafeMutableRawPointer? { dlsym(handle, name) }
+    deinit {
+        if let s = state, let free = freeFn { free(s) }
+        tapCh.forEach { $0.deallocate() }
+        if let h = handle { dlclose(h) }
+    }
+
+    /// Resolve an exported symbol (dylib families only) for kind-specific setters.
+    public func symbol(_ name: String) -> UnsafeMutableRawPointer? {
+        guard let h = handle else { return nil }
+        return dlsym(h, name)
+    }
     public var statePtr: OpaquePointer? { state }
 
-    /// The EffeTune plugin instance id this module mirrors (for routing meters).
-    public var pluginId: String?
-
-    // Spectrum-analyzer time-domain tap: a fixed max-size ring of mono-averaged
-    // samples; the JS analyzer runs its own FFT on the last `spectrumWindow`
-    // samples. Fixed allocation avoids realloc races when the FFT size changes.
-    private let tapMax = 32768
-    private var tap: UnsafeMutableBufferPointer<Float>?
-    private var tapPos = 0
-    public var spectrumWindow = 4096   // = 1 << pt (default pt=12)
-    public var spectrumPosition = 0    // running counter for measurements.bufferPosition
-    private var nanLogged = false
-
-    /// Read this effect's meters into the `measurements` shape its JS onMessage
-    /// expects, or nil if it has no live meter. Reads scalar getters off the RT
-    /// state (a benign torn-float race at worst — fine for a meter).
+    /// Scalar meters in the JS `measurements` shape, or nil if none.
     public func meters() -> [String: Double]? {
         typealias GetF = @convention(c) (OpaquePointer?) -> Float
         func f(_ name: String) -> Double? {
@@ -173,36 +188,59 @@ public final class EffectModule {
             proc(state, UInt32(frames))
             buf.update(from: outp, count: n)
             sanitize(buf, n)
-        case .analyzer:
-            // Tap mono-averaged samples into the ring; audio passes through.
-            guard let t = tap?.baseAddress else { return }
-            let inv = 1.0 / Float(channels)
-            for i in 0..<frames {
-                var s: Float = 0
-                for c in 0..<channels { s += buf[c * frames + i] }
-                t[tapPos] = s * inv
-                tapPos = (tapPos + 1) % tapMax
+        case .analyzer, .jsTap:
+            // Capture per-channel samples; audio passes through unchanged.
+            if tapCh.count < channels { return }
+            for c in 0..<channels {
+                let src = buf + c * frames
+                let ring = tapCh[c]
+                var pos = tapPos
+                for i in 0..<frames { ring[pos] = src[i]; pos = (pos + 1) % tapMax }
             }
+            tapPos = (tapPos + frames) % tapMax
             spectrumPosition += frames
         }
     }
 
-    /// Replace any non-finite output with 0 so one misbehaving effect can't push
-    /// NaN/Inf into the speakers or downstream analyzers. Logs the culprit once.
+    /// Replace non-finite output with 0 so one bad effect can't push NaN/Inf
+    /// into the speakers or downstream analyzers. Logs the culprit once.
     private func sanitize(_ buf: UnsafeMutablePointer<Float>, _ n: Int) {
         var bad = false
         for i in 0..<n where !buf[i].isFinite { buf[i] = 0; bad = true }
         if bad && !nanLogged { nanLogged = true; nlog("non-finite output from \(kind.id) — sanitized to 0") }
     }
 
-    /// Linearized last `spectrumWindow` mono samples for the JS analyzer's FFT,
-    /// or nil if this isn't an analyzer. (Benign torn-float race with the RT tap.)
+    private func ringStart(_ nWin: Int) -> Int { (tapPos - nWin + tapMax) % tapMax }
+
+    /// Mono-averaged last `spectrumWindow` samples for Spectrum/Spectrogram FFT.
     public func spectrumSnapshot() -> [Float]? {
-        guard kind.family == .analyzer, let t = tap?.baseAddress else { return nil }
+        guard !tapCh.isEmpty else { return nil }
         let nWin = min(spectrumWindow, tapMax)
+        let inv = 1.0 / Float(tapCh.count)
         var out = [Float](repeating: 0, count: nWin)
-        let start = (tapPos - nWin + tapMax) % tapMax
-        for i in 0..<nWin { let v = t[(start + i) % tapMax]; out[i] = v.isFinite ? v : 0 }
+        let start = ringStart(nWin)
+        for i in 0..<nWin {
+            let idx = (start + i) % tapMax
+            var s: Float = 0
+            for ring in tapCh { s += ring[idx] }
+            let v = s * inv
+            out[i] = v.isFinite ? v : 0
+        }
         return out
+    }
+
+    /// Per-channel peak (linear) over the last `window` samples. For Level Meter.
+    public func channelPeaks(window: Int) -> [Float] {
+        guard !tapCh.isEmpty else { return [] }
+        let nWin = min(max(window, 1), tapMax)
+        let start = ringStart(nWin)
+        return tapCh.map { ring in
+            var peak: Float = 0
+            for i in 0..<nWin {
+                let v = abs(ring[(start + i) % tapMax])
+                if v.isFinite && v > peak { peak = v }
+            }
+            return peak
+        }
     }
 }

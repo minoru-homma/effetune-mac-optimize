@@ -185,15 +185,23 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
         var list: [[String: Any]] = []
         for e in chain.effects {
             guard let id = e.pluginId else { continue }
-            if let snap = e.spectrumSnapshot() {
-                // Spectrum Analyzer: send the time-domain window; JS runs its FFT.
-                let meas: [String: Any] = ["buffer": [snap], "bufferPosition": e.spectrumPosition,
-                                           "sampleRate": engine.sampleRate, "time": time]
-                list.append(["id": id, "measurements": meas])
-            } else if var m = e.meters() {
-                m["time"] = time
-                list.append(["id": id, "measurements": m])
+            var meas: [String: Any]? = nil
+            switch e.kind.id {
+            case "SpectrumAnalyzerPlugin", "SpectrogramPlugin":
+                // Time-domain mono window; the JS analyzer runs its own FFT.
+                if let snap = e.spectrumSnapshot() {
+                    meas = ["buffer": [snap], "bufferPosition": e.spectrumPosition,
+                            "sampleRate": engine.sampleRate, "time": time]
+                }
+            case "LevelMeterPlugin":
+                // Per-channel linear peak over ~1/30 s (matches the worklet window).
+                let window = max(1, Int(engine.sampleRate / 30.0))
+                meas = ["channels": e.channelPeaks(window: window).map { ["peak": Double($0)] },
+                        "time": time]
+            default:
+                if var m = e.meters() { m["time"] = time; meas = m }
             }
+            if let m = meas { list.append(["id": id, "measurements": m]) }
         }
         guard !list.isEmpty,
               let data = try? JSONSerialization.data(withJSONObject: list),
@@ -279,7 +287,7 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
                     if p.count == 6 { m.setMultibandBand(i, p) }
                 }
             }
-        case "SpectrumAnalyzerPlugin":
+        case "SpectrumAnalyzerPlugin", "SpectrogramPlugin":
             if let pt = payload["pt"] as? Int { m.spectrumWindow = 1 << pt }
         default:
             break
