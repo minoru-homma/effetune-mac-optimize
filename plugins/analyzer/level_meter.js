@@ -290,10 +290,7 @@ class LevelMeterPlugin extends PluginBase {
                 this.stopAnimation();
                 return;
             }
-            if (!window.__effetuneNativeHost || this._needsRedraw) {
-                this.updateMeter();
-                this._needsRedraw = false;
-            }
+            this.updateMeter();
             this.animationFrameId = requestAnimationFrame(animate);
         };
         if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, true);

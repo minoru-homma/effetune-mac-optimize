@@ -233,17 +233,32 @@ if (isNativeHost && typeof window !== 'undefined') {
   // Receive native meter pushes and route each to the matching plugin's
   // onMessage, shaped exactly like the worklet's 'processBuffer' message so the
   // existing plugin meter handlers work unchanged.
-  // JSON carries plain arrays, but the analyzers expect Float32Array (the worklet
-  // sends typed arrays via structured clone). Convert numeric arrays so methods
-  // like buffer.subarray() work. Leaves arrays of objects (e.g. channels) alone.
+  // Decode base64 (raw little-endian float32 bytes) -> Float32Array. Native sends
+  // big float buffers this way ({__f32: base64}) — ~4× smaller than JSON numbers
+  // and far cheaper than serializing/marshaling thousands of values.
+  const decodeF32 = (b64) => {
+    const bin = atob(b64);
+    const n = bin.length;
+    const bytes = new Uint8Array(n);
+    for (let i = 0; i < n; i++) bytes[i] = bin.charCodeAt(i);
+    return new Float32Array(bytes.buffer);
+  };
+
+  // Analyzers expect Float32Array (the worklet sends typed arrays). Revive the
+  // {__f32} markers and convert any plain numeric arrays; leave object arrays.
   const toTyped = (v) => {
+    if (v && typeof v === 'object' && typeof v.__f32 === 'string') return decodeF32(v.__f32);
     if (!Array.isArray(v) || v.length === 0) return v;
     if (typeof v[0] === 'number') return Float32Array.from(v);
+    if (v[0] && typeof v[0] === 'object' && typeof v[0].__f32 === 'string') return v.map((x) => decodeF32(x.__f32));
     if (Array.isArray(v[0])) return v.map((inner) => Float32Array.from(inner));
     return v;
   };
 
-  window.__effetuneOnMeters = (list) => {
+  window.__effetuneOnMeters = (payload) => {
+    // Native passes a JSON string (one cheap arg marshal + fast native JSON.parse)
+    // instead of a nested array (element-by-element JSValue marshaling was ~2.5ms).
+    const list = typeof payload === 'string' ? JSON.parse(payload) : payload;
     if (!Array.isArray(list) || !window.audioManager?.pipeline) return;
     const pipeline = window.audioManager.pipeline;
     for (const item of list) {

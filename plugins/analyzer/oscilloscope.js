@@ -558,10 +558,7 @@ class OscilloscopePlugin extends PluginBase {
                 this.stopAnimation();
                 return;
             }
-            if (!window.__effetuneNativeHost || this._needsRedraw) {
-                this.drawWaveform();
-                this._needsRedraw = false;
-            }
+            this.drawWaveform();
             this.animationFrameId = requestAnimationFrame(animate);
         };
         if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, true);

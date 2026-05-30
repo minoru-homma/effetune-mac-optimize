@@ -799,12 +799,7 @@ class SpectrumAnalyzerPlugin extends PluginBase {
                 this.stopAnimation();
                 return;
             }
-            // Native: only repaint when new data arrived (data is 30Hz; avoids
-            // redundant 60fps GPU draws). Web/Electron keep per-frame draws.
-            if (!window.__effetuneNativeHost || this._needsRedraw) {
-                this.drawGraph();
-                this._needsRedraw = false;
-            }
+            this.drawGraph();
             this.animationFrameId = requestAnimationFrame(animate);
         };
         if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, true);

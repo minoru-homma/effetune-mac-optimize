@@ -28,6 +28,7 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
     private var bufferFrames = 128
     public weak var webView: WKWebView?
     private var meterTimer: Timer?
+    private var meterTick = 0
     // Plugin ids of analyzers whose UI is currently visible (expanded + on-screen).
     // Only these get snapshots/pushes; the meter timer idles when this is empty.
     private var activeIds: Set<String> = []
@@ -244,6 +245,15 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
+    // Encode a Float array as base64 of its raw little-endian bytes, wrapped in a
+    // marker the JS side revives to a Float32Array. This is ~4× smaller than the
+    // JSON text of the numbers (e.g. a 4096-bin spectrum: ~93KB text -> ~22KB) and
+    // far cheaper to marshal, which is the dominant native-side meter cost.
+    private func f32(_ a: [Float]) -> [String: Any] {
+        let b64 = a.withUnsafeBufferPointer { Data(buffer: $0).base64EncodedString() }
+        return ["__f32": b64]
+    }
+
     private func pushMeters() {
         guard let chain = engine.chain else { return }
         let time = CACurrentMediaTime()
@@ -258,7 +268,7 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
             case "SpectrumAnalyzerPlugin", "SpectrogramPlugin":
                 // Time-domain mono window; the JS analyzer runs its own FFT.
                 if let snap = e.spectrumSnapshot() {
-                    meas = ["buffer": [snap], "bufferPosition": e.spectrumPosition,
+                    meas = ["buffer": [f32(snap)], "bufferPosition": e.spectrumPosition,
                             "sampleRate": engine.sampleRate, "time": time]
                 }
             case "LevelMeterPlugin":
@@ -268,35 +278,43 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
                         "time": time]
             case "OscilloscopePlugin":
                 if let mr = e.monoRingSnapshot() {
-                    meas = ["buffer": mr.buffer,
+                    meas = ["buffer": f32(mr.buffer),
                             "triggerIndex": e.oscilloscopeTriggerIndex(autoSec: 0.1),
                             "currentPosition": mr.position,
                             "sampleRate": engine.sampleRate, "time": time]
                 }
             case "StereoMeterPlugin":
                 if let s = e.stereoSnapshot(window: 8192) {
-                    meas = ["xBuffer": s.x, "yBuffer": s.y, "peakBuffer": s.peak,
+                    meas = ["xBuffer": f32(s.x), "yBuffer": f32(s.y), "peakBuffer": f32(s.peak),
                             "currentPosition": s.position,
                             "sampleRate": engine.sampleRate, "time": time]
                 }
             case "MultibandCompressorPlugin":
                 if let gr = e.multibandGainReductions() {
-                    meas = ["gainReductions": gr, "time": time]
+                    meas = ["gainReductions": gr, "time": time]  // tiny (5), leave plain
                 }
             default:
                 if var m = e.meters() { m["time"] = time; meas = m }
             }
             if let m = meas { list.append(["id": id, "measurements": m]) }
         }
-        guard !list.isEmpty else { return }
-        // Pass the payload as a JS ARGUMENT (WebKit marshals it natively) instead
-        // of embedding a ~90KB JSON string into JS source every frame — that made
-        // JSC re-parse megabytes/sec of source. callAsyncJavaScript hands `data`
-        // over as a real object, so there's no Swift JSON-encode + no JS re-parse.
+        guard !list.isEmpty,
+              let data = try? JSONSerialization.data(withJSONObject: list),
+              let json = String(data: data, encoding: .utf8) else { return }
+        // Pass ONE JSON string argument (cheap to marshal) + JSON.parse in JS
+        // (fast native). Passing the nested array directly made callAsyncJavaScript
+        // marshal it element-by-element into JSValues (~2.5ms/call at 30Hz ≈ 7.5%).
+        let t0 = DispatchTime.now().uptimeNanoseconds
         webView?.callAsyncJavaScript(
-            "window.__effetuneOnMeters && window.__effetuneOnMeters(data);",
-            arguments: ["data": list],
+            "window.__effetuneOnMeters && window.__effetuneOnMeters(json);",
+            arguments: ["json": json],
             in: nil, in: .page, completionHandler: nil)
+        let dispatchUs = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1000.0
+        meterTick += 1
+        if meterTick % 60 == 1 {
+            let ids = list.compactMap { $0["id"] as? String }.joined(separator: ",")
+            nlog(String(format: "pushMeters: %d item(s) ids=[%@] bytes=%d dispatch=%.1fµs", list.count, ids, data.count, dispatchUs))
+        }
     }
 
     /// Push the CoreAudio device list to the renderer (window.__effetuneOnDevices).

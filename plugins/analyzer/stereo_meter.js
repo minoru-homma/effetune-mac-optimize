@@ -265,10 +265,7 @@ class StereoMeterPlugin extends PluginBase {
             this.stopAnimation();
             return;
         }
-        if (!window.__effetuneNativeHost || this._needsRedraw) {
-            this.drawMeter();
-            this._needsRedraw = false;
-        }
+        this.drawMeter();
         this.animationFrameId = requestAnimationFrame(animate);
     };
     if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, true);
