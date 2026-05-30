@@ -134,6 +134,7 @@ public final class EffectModule {
     private var tapPos = 0
     public var spectrumWindow = 4096   // = 1 << pt (default pt=12)
     public var spectrumPosition = 0    // running counter for measurements.bufferPosition
+    private var nanLogged = false
 
     /// Read this effect's meters into the `measurements` shape its JS onMessage
     /// expects, or nil if it has no live meter. Reads scalar getters off the RT
@@ -165,11 +166,13 @@ public final class EffectModule {
             io.update(from: buf, count: n)
             proc(state, UInt32(frames))
             buf.update(from: io, count: n)
+            sanitize(buf, n)
         case .splitInOut:
             guard let inp = inputFn?(state), let outp = outputFn?(state), let proc = processFn else { return }
             inp.update(from: buf, count: n)
             proc(state, UInt32(frames))
             buf.update(from: outp, count: n)
+            sanitize(buf, n)
         case .analyzer:
             // Tap mono-averaged samples into the ring; audio passes through.
             guard let t = tap?.baseAddress else { return }
@@ -184,6 +187,14 @@ public final class EffectModule {
         }
     }
 
+    /// Replace any non-finite output with 0 so one misbehaving effect can't push
+    /// NaN/Inf into the speakers or downstream analyzers. Logs the culprit once.
+    private func sanitize(_ buf: UnsafeMutablePointer<Float>, _ n: Int) {
+        var bad = false
+        for i in 0..<n where !buf[i].isFinite { buf[i] = 0; bad = true }
+        if bad && !nanLogged { nanLogged = true; nlog("non-finite output from \(kind.id) — sanitized to 0") }
+    }
+
     /// Linearized last `spectrumWindow` mono samples for the JS analyzer's FFT,
     /// or nil if this isn't an analyzer. (Benign torn-float race with the RT tap.)
     public func spectrumSnapshot() -> [Float]? {
@@ -191,7 +202,7 @@ public final class EffectModule {
         let nWin = min(spectrumWindow, tapMax)
         var out = [Float](repeating: 0, count: nWin)
         let start = (tapPos - nWin + tapMax) % tapMax
-        for i in 0..<nWin { out[i] = t[(start + i) % tapMax] }
+        for i in 0..<nWin { let v = t[(start + i) % tapMax]; out[i] = v.isFinite ? v : 0 }
         return out
     }
 }

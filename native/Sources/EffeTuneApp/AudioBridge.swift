@@ -26,6 +26,7 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
     private var bufferFrames = 128
     public weak var webView: WKWebView?
     private var meterTimer: Timer?
+    private var meterTick = 0
 
     public init(dspDir: String) {
         self.dspDir = dspDir
@@ -123,6 +124,11 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
         guard !list.isEmpty,
               let data = try? JSONSerialization.data(withJSONObject: list),
               let json = String(data: data, encoding: .utf8) else { return }
+        meterTick += 1
+        if meterTick % 40 == 1 {
+            let ids = list.map { ($0["id"] as? String) ?? "?" }.joined(separator: ",")
+            nlog("pushMeters: \(list.count) item(s) ids=[\(ids)] bytes=\(data.count)")
+        }
         webView?.evaluateJavaScript("window.__effetuneOnMeters && window.__effetuneOnMeters(\(json));")
     }
 

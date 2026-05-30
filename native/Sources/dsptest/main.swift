@@ -99,4 +99,23 @@ let chainOut = runChain(["FifteenBandPEQPlugin", "TransientShaperPlugin"], confi
 if chainOut.contains(where: { !$0.isFinite }) { fail("chain non-finite") }
 print(String(format: "  peak_out=%.4f (finite, in range=%@)", peak(chainOut), peak(chainOut) <= 1.0001 ? "yes" : "no"))
 
+// 5. Sub Synth steady-state: stream a low tone through default params and check
+//    for non-finite output (suspected cause of the analyzer going blank).
+print("\n[5] SubSynth non-finite check (default params, 48k, 32 blocks @50Hz)")
+do {
+    guard let kind = EffectKind.find("SubSynthPlugin"),
+          let m = EffectModule(kind: kind, dspDir: dspDir, sampleRate: sr, channels: ch, maxBlock: 4096)
+    else { fail("load sub_synth") }
+    m.setSubSynth([100, 100, 160, -12, 5, -6, 40, 0]) // defaults
+    var anyBad = false, lastPeak: Float = 0
+    for _ in 0..<32 {
+        var blk = makeSine(freq: 50, frames: block, amp: 0.5)
+        blk.withUnsafeMutableBufferPointer { p in m.process(p.baseAddress!, frames: block) }
+        if blk.contains(where: { !$0.isFinite }) { anyBad = true }
+        lastPeak = peak(blk)
+    }
+    print(String(format: "  steady peak_out=%.4f non-finite=%@", lastPeak, anyBad ? "YES(bug)" : "no"))
+    if anyBad { fail("SubSynth produced non-finite output") }
+}
+
 print("\nPASS: native effect chain host verified offline")
