@@ -801,6 +801,7 @@ class SpectrumAnalyzerPlugin extends PluginBase {
             this.drawGraph();
             this.animationFrameId = requestAnimationFrame(animate);
         };
+        if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, true);
         animate();
     }
 
@@ -809,6 +810,7 @@ class SpectrumAnalyzerPlugin extends PluginBase {
             cancelAnimationFrame(this.animationFrameId);
             this.animationFrameId = null;
         }
+        if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, false);
     }
 
     cleanup() {

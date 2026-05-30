@@ -89,6 +89,7 @@ class NativeBridge {
     this.sampleRate = 48000;
     this.channels = 2;
     this.bufferFrames = 128;
+    this._activeAnalyzers = new Set(); // plugin ids of visible analyzers
   }
 
   post(msg) {
@@ -125,6 +126,18 @@ class NativeBridge {
   }
 
   stop() { this.post({ cmd: 'stop' }); }
+
+  // Analyzer visibility gate: each analyzer reports when its draw loop starts/
+  // stops (expanded + on-screen). Native only snapshots/pushes active ids and
+  // idles the meter timer when none are visible. Sent only when the set changes.
+  setAnalyzerActive(pluginId, active) {
+    const id = String(pluginId);
+    const had = this._activeAnalyzers.has(id);
+    if (active) this._activeAnalyzers.add(id); else this._activeAnalyzers.delete(id);
+    if (this._activeAnalyzers.has(id) !== had) {
+      this.post({ cmd: 'setActiveAnalyzers', ids: Array.from(this._activeAnalyzers) });
+    }
+  }
 
   // Async request/reply (file dialogs + IO). Native answers via __effetuneReply.
   _request(cmd, args) {

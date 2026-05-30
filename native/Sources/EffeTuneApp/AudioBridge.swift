@@ -57,6 +57,11 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
         case "stop":
             meterTimer?.invalidate(); meterTimer = nil
             engine.stop()
+        case "setActiveAnalyzers":
+            let ids = (dict["ids"] as? [Any])?.compactMap { idString($0) } ?? []
+            activeIds = Set(ids)
+            applyTapActive()
+            updateMeterTimer()
         case "setPipeline":
             if let dir = dict["dspDir"] as? String { dspDir = dir }
             if let ch = dict["channels"] as? Int { channels = ch }
@@ -198,18 +203,42 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
                          bufferFrames: UInt32(bufferFrames), inputUID: inputUID, outputUID: outputUID)
         do { try engine.start() }
         catch { FileHandle.standardError.write(Data("engine start failed: \(error)\n".utf8)) }
-        startMeterTimer()
+        updateMeterTimer()
     }
 
-    /// Poll each effect's meters ~20x/sec and push them to the matching JS plugin
-    /// (window.__effetuneOnMeters), shaped like the worklet's processBuffer message.
-    private func startMeterTimer() {
-        meterTimer?.invalidate()
-        // ~30 Hz: closer to the worklet's per-half-FFT cadence so the spectrum
-        // updates as smoothly as the original.
-        let timer = Timer(timeInterval: 0.033, repeats: true) { [weak self] _ in self?.pushMeters() }
-        RunLoop.main.add(timer, forMode: .common)
-        meterTimer = timer
+    // Cheap scalar meters (a few float reads, no RT tap). Always pushed when
+    // present so their graphs keep updating without a JS draw-loop hook.
+    private static let scalarMeterKinds: Set<String> = [
+        "TransientShaperPlugin", "AutoLevelerPlugin", "MultibandCompressorPlugin",
+    ]
+
+    private func hasScalarMeter() -> Bool {
+        engine.chain?.effects.contains {
+            $0.pluginId != nil && AudioBridge.scalarMeterKinds.contains($0.kind.id)
+        } ?? false
+    }
+
+    /// Push meters at 60 Hz to match the 60fps draw loop (smooth). The timer runs
+    /// while any analyzer is visible OR a scalar-meter effect is present; else idle.
+    private func updateMeterTimer() {
+        let shouldRun = !activeIds.isEmpty || hasScalarMeter()
+        if shouldRun && meterTimer == nil {
+            let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in self?.pushMeters() }
+            RunLoop.main.add(timer, forMode: .common)
+            meterTimer = timer
+            nlog("meter timer started (active=\(activeIds.count))")
+        } else if !shouldRun && meterTimer != nil {
+            meterTimer?.invalidate(); meterTimer = nil
+            nlog("meter timer stopped (no visible analyzers)")
+        }
+    }
+
+    /// Reflect visibility onto each module's RT audio tap (skip capture when hidden).
+    private func applyTapActive() {
+        guard let chain = engine.chain else { return }
+        for e in chain.effects {
+            if let id = e.pluginId { e.tapActive = activeIds.contains(id) }
+        }
     }
 
     private func pushMeters() {
@@ -218,6 +247,9 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
         var list: [[String: Any]] = []
         for e in chain.effects {
             guard let id = e.pluginId else { continue }
+            // Heavy analyzers only when visible; cheap scalar meters always.
+            let isScalar = AudioBridge.scalarMeterKinds.contains(e.kind.id)
+            guard activeIds.contains(id) || isScalar else { continue }
             var meas: [String: Any]? = nil
             switch e.kind.id {
             case "SpectrumAnalyzerPlugin", "SpectrogramPlugin":
@@ -292,12 +324,14 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
             else { continue }
             m.enabled = (desc["enabled"] as? Bool) ?? true
             m.pluginId = idString(desc["id"]) // plugin.id is numeric in JS
+            m.tapActive = m.pluginId.map { activeIds.contains($0) } ?? true
             apply(desc, to: m)
             chain.append(m)
         }
         let summary = chain.effects.map { "\($0.kind.id)\($0.enabled ? "" : "(off)")" }.joined(separator: ", ")
         nlog("rebuildChain: \(chain.effects.count) effect(s): [\(summary)]")
         engine.chain = chain // see EffectChain note: production needs a lock-free swap
+        updateMeterTimer() // a scalar-meter effect may have been added/removed
     }
 
     /// Decode an EffectDesc payload and push it into the module's setters.

@@ -199,6 +199,8 @@ public final class EffectModule {
             sanitize(buf, n)
         case .analyzer, .jsTap:
             // Capture per-channel samples; audio passes through unchanged.
+            // Skip the capture entirely when the analyzer isn't visible.
+            if !tapActive { return }
             if tapCh.count < channels { return }
             for c in 0..<channels {
                 let src = buf + c * frames
