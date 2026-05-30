@@ -28,7 +28,6 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
     private var bufferFrames = 128
     public weak var webView: WKWebView?
     private var meterTimer: Timer?
-    private var meterTick = 0
     private var lastSpectrumTime: Double = 0 // for native FFT peak-decay timing
     // Plugin ids of analyzers whose UI is currently visible (expanded + on-screen).
     // Only these get snapshots/pushes; the meter timer idles when this is empty.
@@ -317,17 +316,10 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
         // Pass ONE JSON string argument (cheap to marshal) + JSON.parse in JS
         // (fast native). Passing the nested array directly made callAsyncJavaScript
         // marshal it element-by-element into JSValues (~2.5ms/call at 30Hz ≈ 7.5%).
-        let t0 = DispatchTime.now().uptimeNanoseconds
         webView?.callAsyncJavaScript(
             "window.__effetuneOnMeters && window.__effetuneOnMeters(json);",
             arguments: ["json": json],
             in: nil, in: .page, completionHandler: nil)
-        let dispatchUs = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1000.0
-        meterTick += 1
-        if meterTick % 60 == 1 {
-            let ids = list.compactMap { $0["id"] as? String }.joined(separator: ",")
-            nlog(String(format: "pushMeters: %d item(s) ids=[%@] bytes=%d dispatch=%.1fµs", list.count, ids, data.count, dispatchUs))
-        }
     }
 
     /// Push the CoreAudio device list to the renderer (window.__effetuneOnDevices).
