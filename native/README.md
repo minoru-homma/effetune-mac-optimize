@@ -103,12 +103,17 @@ EFFETUNE_WEBROOT="$(pwd)" open native/.build/EffeTune.app
 - [x] Renderer fully in controller mode: `AudioManager` + `PipelineWorkletSync`
       route pipeline/param changes to native (Web Audio off). Normalizers for
       PEQ / transient / limiter / auto-leveler. Plugin list filtered to the 8.
-- [x] **native→JS meters**: engine polls effect meter getters ~20Hz and pushes
-      to the matching plugin's `onMessage`. **LIVE: Auto Leveler LUFS graph
-      confirmed** (also Transient Shaper gain).
-- [ ] Remaining: Sub Synth / Multiband param normalizers; Spectrum Analyzer
-      waveform forwarding (needs an audio-buffer tap); Multiband/Brickwall meters;
-      presets filtered to the 8 supported effects.
+- [x] **All 8 effects** have param normalizers (PEQ ×2, transient, limiter,
+      auto-leveler, sub-synth, multiband, spectrum). All process in the chain.
+- [x] **native→JS meters** (~30Hz): engine polls effect meter getters / a
+      spectrum time-domain tap and pushes to the matching plugin's `onMessage`.
+      **LIVE confirmed: Auto Leveler LUFS, Transient gain, and Spectrum Analyzer
+      waveform** (incl. a fix to rebind the analyzer's WebGPU renderer to the new
+      canvas on pipeline re-render). Non-finite effect output is sanitized.
+- [ ] Remaining: Multiband / Brickwall gain-reduction meters (their `onMessage`
+      differs); presets filtered to the 8 supported effects.
+
+> Level Meter and other non-Rust analyzers are out of scope (not among the 8).
 - [ ] Presets filtered to the 8 effects (graceful skip of unknown names in
       `js/preset-manager.js`).
 - [ ] E2E: latency (loopback @64/128), live chain audio, RT param updates, preset
