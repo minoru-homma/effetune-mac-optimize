@@ -445,6 +445,7 @@ class OscilloscopePlugin extends PluginBase {
         message.measurements.buffer
       ) {
         this.process(message.measurements.buffer, message);
+        this._needsRedraw = true; // gate the RAF redraw to data arrival (native)
       }
     }
   
@@ -557,7 +558,10 @@ class OscilloscopePlugin extends PluginBase {
                 this.stopAnimation();
                 return;
             }
-            this.drawWaveform();
+            if (!window.__effetuneNativeHost || this._needsRedraw) {
+                this.drawWaveform();
+                this._needsRedraw = false;
+            }
             this.animationFrameId = requestAnimationFrame(animate);
         };
         if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, true);

@@ -231,6 +231,7 @@ class StereoMeterPlugin extends PluginBase {
   onMessage(message) {
     if (message.type === 'processBuffer' && message.measurements) {
       this.process(message.measurements);
+      this._needsRedraw = true; // gate the RAF redraw to data arrival (native)
     }
   }
 
@@ -264,7 +265,10 @@ class StereoMeterPlugin extends PluginBase {
             this.stopAnimation();
             return;
         }
-        this.drawMeter();
+        if (!window.__effetuneNativeHost || this._needsRedraw) {
+            this.drawMeter();
+            this._needsRedraw = false;
+        }
         this.animationFrameId = requestAnimationFrame(animate);
     };
     if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, true);

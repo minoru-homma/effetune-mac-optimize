@@ -227,6 +227,7 @@ class SpectrumAnalyzerPlugin extends PluginBase {
     onMessage(message) {
         if (message.type === 'processBuffer') {
             this.process(message);
+            this._needsRedraw = true; // gate the RAF redraw to data arrival (native)
         }
     }
 
@@ -798,7 +799,12 @@ class SpectrumAnalyzerPlugin extends PluginBase {
                 this.stopAnimation();
                 return;
             }
-            this.drawGraph();
+            // Native: only repaint when new data arrived (data is 30Hz; avoids
+            // redundant 60fps GPU draws). Web/Electron keep per-frame draws.
+            if (!window.__effetuneNativeHost || this._needsRedraw) {
+                this.drawGraph();
+                this._needsRedraw = false;
+            }
             this.animationFrameId = requestAnimationFrame(animate);
         };
         if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, true);

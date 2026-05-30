@@ -244,6 +244,7 @@ class SpectrogramPlugin extends PluginBase {
     onMessage(message) {
         if (message.type === 'processBuffer') {
             this.process(message);
+            this._needsRedraw = true; // gate the RAF redraw to data arrival (native)
         }
     }
 
@@ -424,7 +425,7 @@ class SpectrogramPlugin extends PluginBase {
     }
 
     handleIntersect(entries) { /* ... (same as original) ... */ entries.forEach(entry => {this.isVisible = entry.isIntersecting; if (this.isVisible) {this.startAnimation();} else {this.stopAnimation();}}); }
-    startAnimation() { if (this.animationFrameId) return; if (!this.enabled || !this._sectionEnabled) return; const animate = () => {if (!this.isVisible) {this.stopAnimation(); return;} this.drawGraph(); this.animationFrameId = requestAnimationFrame(animate);}; if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, true); animate(); }
+    startAnimation() { if (this.animationFrameId) return; if (!this.enabled || !this._sectionEnabled) return; const animate = () => {if (!this.isVisible) {this.stopAnimation(); return;} if (!window.__effetuneNativeHost || this._needsRedraw) { this.drawGraph(); this._needsRedraw = false; } this.animationFrameId = requestAnimationFrame(animate);}; if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, true); animate(); }
     stopAnimation() { if (this.animationFrameId) {cancelAnimationFrame(this.animationFrameId); this.animationFrameId = null;} if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, false); }
     cleanup() { /* ... (mostly same, ensure listeners are correctly removed if stored differently) ... */
         this.stopAnimation();
