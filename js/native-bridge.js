@@ -195,6 +195,22 @@ export const nativeBridge = isNativeHost ? new NativeBridge() : null;
 if (isNativeHost && typeof window !== 'undefined') {
   window.nativeBridge = nativeBridge;
 
+  // Persist panel open/close: wrap uiManager.expandedPlugins add/delete/clear so
+  // toggling a panel triggers a debounced save (it doesn't go through
+  // setPipeline/updateParams). Polls until uiManager exists, then patches once.
+  const installExpandWatch = () => {
+    const set = window.uiManager && window.uiManager.expandedPlugins;
+    if (!set) return false;
+    if (set.__effetuneWatched) return true;
+    set.__effetuneWatched = true;
+    ['add', 'delete', 'clear'].forEach((m) => {
+      const orig = set[m].bind(set);
+      set[m] = (...args) => { const r = orig(...args); nativeBridge.saveStateDebounced(); return r; };
+    });
+    return true;
+  };
+  const _expandWatchTimer = setInterval(() => { if (installExpandWatch()) clearInterval(_expandWatchTimer); }, 500);
+
   // Native answers async requests (file dialogs / IO) here.
   window.__effetuneReply = (reqId, result) => {
     const cb = _pendingRequests[reqId];
