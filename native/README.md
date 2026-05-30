@@ -110,10 +110,18 @@ EFFETUNE_WEBROOT="$(pwd)" open native/.build/EffeTune.app
       **LIVE confirmed: Auto Leveler LUFS, Transient gain, and Spectrum Analyzer
       waveform** (incl. a fix to rebind the analyzer's WebGPU renderer to the new
       canvas on pipeline re-render). Non-finite effect output is sanitized.
+- [x] **Display-only analyzers** (no Rust DSP — native taps the audio, JS renders):
+      Level Meter, Spectrogram, Oscilloscope (auto-sweep trigger), Stereo Meter.
+      A `.jsTap` module kind + per-channel tap; numeric meter arrays are converted
+      to Float32Array on the JS side to match worklet semantics.
+- [x] **Preset file load/save** via NSOpen/NSSavePanel + native file IO
+      (File ▸ Import/Export Preset). Prefs persist in localStorage.
 - [ ] Remaining: Multiband / Brickwall gain-reduction meters (their `onMessage`
-      differs); presets filtered to the 8 supported effects.
+      differs); presets that reference unsupported effects should skip gracefully.
 
-> Level Meter and other non-Rust analyzers are out of scope (not among the 8).
+> Supported effects = the 8 Rust DSP modules + 5 display-only analyzers
+> (Spectrum/Level/Spectrogram/Oscilloscope/Stereo). Other JS DSP effects remain
+> out of scope. Oscilloscope trigger and Stereo peak-hold are simplified.
 - [ ] Presets filtered to the 8 effects (graceful skip of unknown names in
       `js/preset-manager.js`).
 - [ ] E2E: latency (loopback @64/128), live chain audio, RT param updates, preset
