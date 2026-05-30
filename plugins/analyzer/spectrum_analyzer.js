@@ -812,7 +812,11 @@ class SpectrumAnalyzerPlugin extends PluginBase {
                 this.stopAnimation();
                 return;
             }
-            this.drawGraph();
+            // Native: draw every other frame (~30fps; data is 30Hz) to halve GPU
+            // compositing cost. Web/Electron keep 60fps.
+            if (!window.__effetuneNativeHost || (this._frameSkip = !this._frameSkip)) {
+                this.drawGraph();
+            }
             this.animationFrameId = requestAnimationFrame(animate);
         };
         if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, true);
