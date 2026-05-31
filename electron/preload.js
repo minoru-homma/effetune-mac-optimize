@@ -107,6 +107,8 @@ contextBridge.exposeInMainWorld(
     // Renderer ping for the main-process watchdog (fire-and-forget).  Sent every
     // 2 s; if main does not see a ping for 15 s it forcibly relaunches the app.
     rendererPing: () => ipcRenderer.send('renderer-ping'),
+    armRendererWatchdog: (reason) => ipcRenderer.invoke('renderer-watchdog-arm', reason),
+    disarmRendererWatchdog: (reason) => ipcRenderer.invoke('renderer-watchdog-disarm', reason),
 
     // HDMI/audio diagnostic log — fire-and-forget append to userData/effetune-debug.log.
     writeDebugLog: (message) => ipcRenderer.send('write-debug-log', message),

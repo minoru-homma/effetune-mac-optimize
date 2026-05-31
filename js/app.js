@@ -3,6 +3,7 @@ import { AudioManager, hdmiDebug } from './audio-manager.js';
 import { UIManager } from './ui-manager.js';
 import { electronIntegration } from './electron-integration.js';
 import { applySerializedState } from './utils/serialization-utils.js';
+import { startRendererWatchdogHeartbeat } from './electron-watchdog.js';
 
 // Make electronIntegration globally accessible first
 window.electronIntegration = electronIntegration;
@@ -305,7 +306,14 @@ class App {
             // Initialize pipeline state and build audio pipeline as a single operation
             // This ensures plugins are created with AudioWorklet already initialized
             await this.initializeAndBuildPipeline();
-            
+
+            // All updatePlugins messages from the startup sequence (saved state,
+            // startup/CLI/tray preset) have been posted to the worklet by now.
+            // The output gain has been held at 0 since initAudioOutput so nothing
+            // could leak through; fade it in to make the configured pipeline
+            // audible without any click.
+            this.audioManager.fadeInOutput();
+
             // Set up event listeners and finalize initialization
             this.setupEventListeners();
             
@@ -1502,17 +1510,7 @@ async function displayAppVersion() {
     
 }
 
-// Renderer-side watchdog ping.  Sent every 2 s; main process force-relaunches
-// the app if it does not see a ping for 15 s.  This is the last-resort safety
-// net catching renderer freezes that escape our in-renderer timeout wrappers
-// (e.g., a native audio call that synchronously blocks the JS thread).
-if (window.electronAPI?.rendererPing) {
-    setInterval(() => {
-        try { window.electronAPI.rendererPing(); } catch (_) { /* fire-and-forget */ }
-    }, 2000);
-    // Send one immediately so the watchdog arms on first event-loop tick.
-    try { window.electronAPI.rendererPing(); } catch (_) { /* ignore */ }
-}
+startRendererWatchdogHeartbeat('main-page');
 
 // Set up event listeners for tray menu functionality
 if (window.electronAPI && window.electronIntegration && window.electronIntegration.isElectron) {
