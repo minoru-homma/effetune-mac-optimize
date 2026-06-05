@@ -35,6 +35,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/dsp"
 cp "$NATIVE/app/Info.plist" "$APP/Contents/Info.plist"
 cp "$BIN" "$APP/Contents/MacOS/EffeTuneApp"
 cp "$NATIVE"/dsp/*.dylib "$APP/Contents/Resources/dsp/"
+# App icon (Info.plist references CFBundleIconFile = icon.icns).
+[ -f "$NATIVE/app/icon.icns" ] && cp "$NATIVE/app/icon.icns" "$APP/Contents/Resources/icon.icns"
 
 if [ "$BUNDLE_WEB" = "1" ]; then
   echo "[make-app] bundling web UI"
