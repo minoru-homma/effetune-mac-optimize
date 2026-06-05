@@ -13,6 +13,11 @@ public struct AudioDeviceInfo: Codable {
 }
 
 public enum AudioDevices {
+    /// Synthetic input UID for the in-app system-audio tap (not a real CoreAudio
+    /// device). Selecting it makes the engine source from a Core Audio process tap
+    /// instead of an input AUHAL. See SystemAudioTap.
+    public static let systemTapUID = "effetune:system-tap"
+
     private static func addr(_ sel: AudioObjectPropertySelector,
                             _ scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal)
         -> AudioObjectPropertyAddress {
@@ -94,6 +99,12 @@ public enum AudioDevices {
         let defIn = defaultDevice(kAudioHardwarePropertyDefaultInputDevice)
         let defOut = defaultDevice(kAudioHardwarePropertyDefaultOutputDevice)
         var out: [AudioDeviceInfo] = []
+        // Offer the in-app system-audio capture as a pseudo input (macOS 14.4+).
+        if #available(macOS 14.4, *) {
+            out.append(AudioDeviceInfo(uid: systemTapUID, name: "System Audio (EffeTune Tap)",
+                                       hasInput: true, hasOutput: false,
+                                       isDefaultInput: false, isDefaultOutput: false))
+        }
         for id in deviceIDs() {
             guard let uid = deviceUID(id) else { continue }
             let name = stringProp(id, kAudioObjectPropertyName) ?? stringProp(id, kAudioDevicePropertyDeviceNameCFString) ?? uid

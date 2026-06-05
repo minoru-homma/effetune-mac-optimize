@@ -233,8 +233,21 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
         engine.configure(sampleRate: sampleRate, channels: channels,
                          bufferFrames: UInt32(bufferFrames), inputUID: inputUID, outputUID: outputUID)
         do { try engine.start() }
-        catch { FileHandle.standardError.write(Data("engine start failed: \(error)\n".utf8)) }
+        catch {
+            nlog("engine start failed: \(error)")
+            notifyAudioError((error as NSError).localizedDescription)
+        }
         updateMeterTimer()
+    }
+
+    /// Surface an engine error (e.g. system-audio capture permission denied) to the
+    /// renderer so the user sees it. Encodes the message as JSON to escape it safely.
+    private func notifyAudioError(_ message: String) {
+        guard let data = try? JSONSerialization.data(withJSONObject: [message]),
+              let arr = String(data: data, encoding: .utf8) else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.webView?.evaluateJavaScript("window.__effetuneOnAudioError && window.__effetuneOnAudioError(\(arr)[0]);")
+        }
     }
 
     // Cheap scalar meters (a few float reads, no RT tap). Always pushed when
@@ -355,6 +368,7 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
     /// Push the CoreAudio device list to the renderer (window.__effetuneOnDevices).
     private func sendDeviceList() {
         let devices = AudioDevices.list()
+        nlog("listDevices: \(devices.map { "\($0.name)\($0.hasInput ? "[in]" : "")\($0.hasOutput ? "[out]" : "")" }.joined(separator: ", "))")
         guard let data = try? JSONEncoder().encode(devices),
               let json = String(data: data, encoding: .utf8) else { return }
         DispatchQueue.main.async { [weak self] in

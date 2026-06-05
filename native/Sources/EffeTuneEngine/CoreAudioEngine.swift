@@ -33,6 +33,12 @@ public final class CoreAudioEngine {
     private var inputUnit: AudioUnit?
     private var outputUnit: AudioUnit?
 
+    // System-audio capture path (input source = process tap, not an AUHAL).
+    // Stored as Any? so the engine itself stays available on macOS 13 (the tap is
+    // macOS 14.4+); the concrete SystemAudioTap is only touched in #available blocks.
+    private var usingTap = false
+    private var tapBox: Any?
+
     // Per-channel SPSC ring (indices in frames, shared; guarded by a tiny lock
     // used only for index publish/consume — never around the bulk copies).
     private var ring: [UnsafeMutablePointer<Float>] = []
@@ -66,15 +72,27 @@ public final class CoreAudioEngine {
 
     public func start() throws {
         stop()
-        // Run the engine at the INPUT device's nominal rate. The input AUHAL then
-        // needs no sample-rate conversion (mismatched input SRC fails with
-        // -10863 / CannotDoInCurrentContext). The OUTPUT AUHAL converts engineSR
-        // -> output-device rate, which is the reliable direction.
-        let inDev = AudioDevices.deviceID(forUID: inputUID ?? "")
-            ?? AudioDevices.defaultDeviceID(kAudioHardwarePropertyDefaultInputDevice)
-        if let devSR = AudioDevices.nominalSampleRate(inDev), devSR != sampleRate {
-            nlog("override sampleRate \(sampleRate) -> input device \(devSR)")
-            sampleRate = devSR
+        usingTap = (inputUID == AudioDevices.systemTapUID)
+        if usingTap {
+            // System-audio capture: source from a Core Audio process tap. Adopt the
+            // tap's sample rate (the output AUHAL converts engineSR -> output rate).
+            guard #available(macOS 14.4, *) else { throw err("System audio capture requires macOS 14.4 or later") }
+            let t = try SystemAudioTap()
+            tapBox = t
+            sampleRate = t.sampleRate
+            inputChannels = max(1, min(channels, t.channelCount))
+            nlog("input source: system tap (inCh=\(inputChannels))")
+        } else {
+            // Run the engine at the INPUT device's nominal rate. The input AUHAL then
+            // needs no sample-rate conversion (mismatched input SRC fails with
+            // -10863 / CannotDoInCurrentContext). The OUTPUT AUHAL converts engineSR
+            // -> output-device rate, which is the reliable direction.
+            let inDev = AudioDevices.deviceID(forUID: inputUID ?? "")
+                ?? AudioDevices.defaultDeviceID(kAudioHardwarePropertyDefaultInputDevice)
+            if let devSR = AudioDevices.nominalSampleRate(inDev), devSR != sampleRate {
+                nlog("override sampleRate \(sampleRate) -> input device \(devSR)")
+                sampleRate = devSR
+            }
         }
         // Ring sized to comfortably hold several device buffers of slack.
         ringFrames = max(8192, maxFrames * 4)
@@ -93,10 +111,19 @@ public final class CoreAudioEngine {
         os.initialize(repeating: 0); outScratch = os
 
         nlog("engine start: sr=\(sampleRate) ch=\(channels) buf=\(bufferFrames) inUID=\(inputUID ?? "default") outUID=\(outputUID ?? "default")")
-        try buildInputUnit()
-        try buildOutputUnit()
-        if let u = inputUnit { try check(AudioOutputUnitStart(u), "start input") }
-        if let u = outputUnit { try check(AudioOutputUnitStart(u), "start output") }
+        if usingTap {
+            // Tap feeds the ring directly; only the output AUHAL is an AudioUnit.
+            try buildOutputUnit()
+            if #available(macOS 14.4, *), let t = tapBox as? SystemAudioTap {
+                try t.start { [weak self] abl, frames in self?.captureTap(abl, frames: frames) }
+            }
+            if let u = outputUnit { try check(AudioOutputUnitStart(u), "start output") }
+        } else {
+            try buildInputUnit()
+            try buildOutputUnit()
+            if let u = inputUnit { try check(AudioOutputUnitStart(u), "start input") }
+            if let u = outputUnit { try check(AudioOutputUnitStart(u), "start output") }
+        }
         nlog("engine started OK (sr=\(sampleRate))")
         // 1.5s later, report whether the IO threads actually ran.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
@@ -112,6 +139,8 @@ public final class CoreAudioEngine {
     }
 
     public func stop() {
+        if #available(macOS 14.4, *), let t = tapBox as? SystemAudioTap { t.stop() }
+        tapBox = nil; usingTap = false
         for u in [inputUnit, outputUnit].compactMap({ $0 }) {
             AudioOutputUnitStop(u); AudioUnitUninitialize(u); AudioComponentInstanceDispose(u)
         }
@@ -227,21 +256,62 @@ public final class CoreAudioEngine {
             return noErr
         }
         if inCount <= 2 { nlog("input callback firing (frames \(n))") }
+        writeRing(from: cap, srcChannels: inputChannels, frames: n)
+        return noErr
+    }
 
-        // Write into the ring; on overrun drop this input block (don't touch readIdx).
+    /// System-audio tap callback (RT CoreAudio thread). Copies the tapped buffer
+    /// list into the planar capture scratch (de-interleaving when needed), then
+    /// feeds the same ring the input AUHAL would. Producer is single (tap XOR
+    /// AUHAL — never both), so the SPSC ring invariant holds.
+    fileprivate func captureTap(_ inData: UnsafePointer<AudioBufferList>, frames: UInt32) {
+        guard let cap = capture?.baseAddress else { return }
+        let n = Int(frames)
+        if n <= 0 || n > maxFrames { return }
+        let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inData))
+        let bufs = list.count
+        if bufs == 0 { return }
+        if bufs == 1 && Int(list[0].mNumberChannels) > 1 {
+            // Interleaved: one buffer, N channels.
+            let ch = Int(list[0].mNumberChannels)
+            guard let src = list[0].mData?.assumingMemoryBound(to: Float.self) else { return }
+            for c in 0..<inputChannels {
+                let sc = min(c, ch - 1)
+                let dst = cap + c * maxFrames
+                var i = 0
+                while i < n { dst[i] = src[i * ch + sc]; i += 1 }
+            }
+        } else {
+            // Non-interleaved: one (mono) buffer per channel.
+            for c in 0..<inputChannels {
+                let sc = min(c, bufs - 1)
+                guard let src = list[sc].mData?.assumingMemoryBound(to: Float.self) else { continue }
+                (cap + c * maxFrames).update(from: src, count: n)
+            }
+        }
+        inCount += 1
+        if inCount <= 2 { nlog("tap callback firing (frames \(n), bufs \(bufs))") }
+        writeRing(from: cap, srcChannels: inputChannels, frames: n)
+    }
+
+    /// Write `n` frames of planar float source (channel-major, stride = maxFrames)
+    /// into the ring, up-mixing to the engine channel count (engine channel c reads
+    /// source channel min(c, srcChannels-1) — so a mono source fills all channels).
+    /// On overrun the block is dropped (readIdx untouched). RT-safe.
+    @inline(__always)
+    private func writeRing(from cap: UnsafeMutablePointer<Float>, srcChannels: Int, frames n: Int) {
         os_unfair_lock_lock(&idxLock)
         let w = writeIdx, r = readIdx
         os_unfair_lock_unlock(&idxLock)
         let avail = (w - r + ringFrames) % ringFrames
         let free = ringFrames - 1 - avail
-        if free < n { return noErr } // overrun: drop
+        if free < n { return } // overrun: drop
         // Chunked copy (≤2 segments around the ring wrap) instead of a per-sample
-        // modulo loop — far cheaper on the RT thread. Up-mix maps each engine
-        // channel to its source capture channel (mono mic -> all engine channels).
+        // modulo loop — far cheaper on the RT thread.
         let start = w % ringFrames
         let first = min(n, ringFrames - start)
         for c in 0..<channels {
-            let srcBase = cap + min(c, inputChannels - 1) * maxFrames
+            let srcBase = cap + min(c, srcChannels - 1) * maxFrames
             ring[c].advanced(by: start).update(from: srcBase, count: first)
             if first < n {
                 ring[c].update(from: srcBase + first, count: n - first)
@@ -250,7 +320,6 @@ public final class CoreAudioEngine {
         os_unfair_lock_lock(&idxLock)
         writeIdx = (writeIdx + n) % ringFrames
         os_unfair_lock_unlock(&idxLock)
-        return noErr
     }
 
     fileprivate func renderOutput(_ frames: UInt32, _ ioData: UnsafeMutablePointer<AudioBufferList>?) -> OSStatus {

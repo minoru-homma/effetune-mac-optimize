@@ -262,6 +262,15 @@ if (isNativeHost && typeof window !== 'undefined') {
   };
   const _expandWatchTimer = setInterval(() => { if (installExpandWatch()) clearInterval(_expandWatchTimer); }, 500);
 
+  // Native reports a recoverable audio error (e.g. system-audio capture denied:
+  // the user must allow audio recording in System Settings › Privacy & Security).
+  window.__effetuneOnAudioError = (message) => {
+    try {
+      console.error('[native audio]', message);
+      window.uiManager?.setError(String(message || 'Audio error'), true);
+    } catch (_) { /* best effort */ }
+  };
+
   // Native answers async requests (file dialogs / IO) here.
   window.__effetuneReply = (reqId, result) => {
     const cb = _pendingRequests[reqId];

@@ -24,5 +24,7 @@
     <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>EffeTune processes audio from your selected input device in real time.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>EffeTune captures audio from other apps so it can process the system audio in real time.</string>
 </dict>
 </plist>
