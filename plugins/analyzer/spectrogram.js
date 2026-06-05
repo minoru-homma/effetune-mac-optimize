@@ -400,6 +400,7 @@ class SpectrogramPlugin extends PluginBase {
         const graphContainer = document.createElement('div');
         graphContainer.className = 'graph-container';
         graphContainer.style.position = 'relative'; graphContainer.style.width = '1024px'; graphContainer.style.height = '480px';
+        this._graphContainer = graphContainer; // measured for the native Metal overlay
         const canvas = document.createElement('canvas');
         canvas.width = 2048; canvas.height = 960; // Internal buffer size
         canvas.style.width = '1024px'; canvas.style.height = '480px'; // CSS display size
@@ -425,8 +426,53 @@ class SpectrogramPlugin extends PluginBase {
     }
 
     handleIntersect(entries) { /* ... (same as original) ... */ entries.forEach(entry => {this.isVisible = entry.isIntersecting; if (this.isVisible) {this.startAnimation();} else {this.stopAnimation();}}); }
-    startAnimation() { if (this.animationFrameId) return; if (!this.enabled || !this._sectionEnabled) return; const animate = () => {if (!this.isVisible) {this.stopAnimation(); return;} this.drawGraph(); this.animationFrameId = requestAnimationFrame(animate);}; if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, true); animate(); }
-    stopAnimation() { if (this.animationFrameId) {cancelAnimationFrame(this.animationFrameId); this.animationFrameId = null;} if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, false); }
+    startAnimation() {
+        if (this.animationFrameId) return;
+        if (!this.enabled || !this._sectionEnabled) return;
+        const animate = () => {
+            if (!this.isVisible) { this.stopAnimation(); return; }
+            if (this._overlayActive()) {
+                // Native Metal draws the spectrogram; JS only reports the rect.
+                this._reportOverlayRect();
+            } else {
+                this._teardownOverlay();
+                this.drawGraph();
+            }
+            this.animationFrameId = requestAnimationFrame(animate);
+        };
+        if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, true);
+        animate();
+    }
+    stopAnimation() {
+        if (this.animationFrameId) { cancelAnimationFrame(this.animationFrameId); this.animationFrameId = null; }
+        if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, false);
+        this._teardownOverlay();
+    }
+
+    // Native Metal overlay (macOS host): replace the per-frame JS FFT + putImageData
+    // with a native scrolling heatmap. dr is sent so native matches the colour map.
+    _overlayActive() {
+        return !!(window.nativeBridge && window.nativeBridge.overlayManages
+            && window.nativeBridge.overlayManages('SpectrogramPlugin'))
+            && !!this._graphContainer && !!this.canvas;
+    }
+    _reportOverlayRect() {
+        if (!window.nativeBridge || !this._graphContainer) return;
+        const r = this._graphContainer.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return;
+        const last = this._lastOverlayRect;
+        if (last && last.x === r.left && last.y === r.top
+            && last.w === r.width && last.h === r.height && this._lastOverlayDr === this.dr) return;
+        this._lastOverlayRect = { x: r.left, y: r.top, w: r.width, h: r.height };
+        this._lastOverlayDr = this.dr;
+        window.nativeBridge.setOverlayRect(this.id, 'SpectrogramPlugin', this._lastOverlayRect, { dr: this.dr });
+    }
+    _teardownOverlay() {
+        if (!this._lastOverlayRect) return;
+        this._lastOverlayRect = null;
+        this._lastOverlayDr = undefined;
+        if (window.nativeBridge) window.nativeBridge.removeOverlay(this.id);
+    }
     cleanup() { /* ... (mostly same, ensure listeners are correctly removed if stored differently) ... */
         this.stopAnimation();
         if (this.observer && this.canvas) {

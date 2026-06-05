@@ -30,6 +30,12 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("WebKit"),
+                // Native analyzer overlay: Metal rendering composited over the
+                // WKWebView, driven by a CVDisplayLink (CoreVideo).
+                .linkedFramework("Metal"),
+                .linkedFramework("QuartzCore"),
+                .linkedFramework("CoreVideo"),
+                .linkedFramework("IOSurface"),
             ]
         ),
     ]

@@ -641,6 +641,7 @@ class SpectrumAnalyzerPlugin extends PluginBase {
         const graphContainer = document.createElement('div');
         graphContainer.className = 'graph-container';
         graphContainer.style.position = 'relative'; graphContainer.style.width = '1024px'; graphContainer.style.height = '480px';
+        this._graphContainer = graphContainer; // measured for the native overlay rect
         
         // Base canvas: ALWAYS the Canvas 2D fallback target. getContext('webgpu')
         // is never called on it, so getContext('2d') keeps working even after a
@@ -675,7 +676,14 @@ class SpectrumAnalyzerPlugin extends PluginBase {
                 window.electronAPI.logToMain(level, 'SpectrumAnalyzer', text);
             }
         };
-        if (this._gpuDisabled) {
+        if (this._overlayActive()) {
+            // Native host renders this analyzer with Metal, composited over the
+            // WebView. JS only paints the static backdrop (background + grid +
+            // axis labels) onto the base canvas; the dynamic spectrum/peaks are
+            // drawn natively and show through the transparent overlay. No WebGPU
+            // init, no per-frame Canvas draw, no meter IPC.
+            this._ensureOverlayBackdrop();
+        } else if (this._gpuDisabled) {
             gpuLogToMain('info', 'WebGPU disabled by ?gpu=0 flag, using Canvas 2D');
         } else if (typeof window === 'undefined') {
             // headless / non-browser context — no GPU
@@ -812,7 +820,15 @@ class SpectrumAnalyzerPlugin extends PluginBase {
                 this.stopAnimation();
                 return;
             }
-            this.drawGraph();
+            if (this._overlayActive()) {
+                // Native Metal draws the spectrum; JS only keeps the backdrop
+                // current and reports the on-screen rect (cheap, diff-gated).
+                this._ensureOverlayBackdrop();
+                this._reportOverlayRect();
+            } else {
+                this._teardownOverlay();
+                this.drawGraph();
+            }
             this.animationFrameId = requestAnimationFrame(animate);
         };
         if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, true);
@@ -825,6 +841,95 @@ class SpectrumAnalyzerPlugin extends PluginBase {
             this.animationFrameId = null;
         }
         if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, false);
+        this._teardownOverlay();
+    }
+
+    // True when this analyzer is rendered by the native Metal overlay. The
+    // native FFT path only supports the 4096-point window (pt=12); other sizes
+    // fall back to the JS Canvas/WebGPU path.
+    _overlayActive() {
+        return !!(window.nativeBridge && window.nativeBridge.overlayManages
+            && window.nativeBridge.overlayManages('SpectrumAnalyzerPlugin'))
+            && this.pt === 12 && !!this._graphContainer && !!this.canvas;
+    }
+
+    // Send the graph container's viewport rect to native when it changes.
+    _reportOverlayRect() {
+        if (!window.nativeBridge || !this._graphContainer) return;
+        const r = this._graphContainer.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return;
+        const last = this._lastOverlayRect;
+        if (last && last.x === r.left && last.y === r.top
+            && last.w === r.width && last.h === r.height && this._lastOverlayDr === this.dr) return;
+        this._lastOverlayRect = { x: r.left, y: r.top, w: r.width, h: r.height };
+        this._lastOverlayDr = this.dr;
+        window.nativeBridge.setOverlayRect(this.id, 'SpectrumAnalyzerPlugin', this._lastOverlayRect, { dr: this.dr });
+    }
+
+    // Hide the native overlay (no longer visible / switched off overlay mode).
+    _teardownOverlay() {
+        if (!this._lastOverlayRect) return;
+        this._lastOverlayRect = null;
+        this._lastOverlayDr = undefined;
+        if (window.nativeBridge) window.nativeBridge.removeOverlay(this.id);
+    }
+
+    // Redraw the static backdrop (background + grid + axis labels) onto the base
+    // canvas when the dB range changes; the native overlay draws the curve on top.
+    _ensureOverlayBackdrop() {
+        if (this._overlayBackdropDr === this.dr) return;
+        this._drawOverlayBackdrop();
+        this._overlayBackdropDr = this.dr;
+    }
+
+    _drawOverlayBackdrop() {
+        if (!this.canvas) return;
+        const ctx = this.canvas.getContext('2d', { alpha: false });
+        if (!ctx) return;
+        const width = this.canvas.width;
+        const height = this.canvas.height;
+
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, width, height);
+        ctx.strokeStyle = '#333';
+        ctx.lineWidth = 2;
+
+        const minDisplayFreq = 20;
+        const maxDisplayFreq = 40000;
+        const logMin = Math.log10(minDisplayFreq);
+        const logRange = Math.log10(maxDisplayFreq) - logMin;
+        if (logRange <= 0) return;
+
+        let freqs = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000]
+            .filter(f => f >= minDisplayFreq && f <= maxDisplayFreq);
+        if (!freqs.includes(minDisplayFreq)) freqs.unshift(minDisplayFreq);
+        if (!freqs.includes(maxDisplayFreq)) freqs.push(maxDisplayFreq);
+        freqs = [...new Set(freqs)].sort((a, b) => a - b);
+        freqs.forEach(freq => {
+            const x = width * (Math.log10(freq) - logMin) / logRange;
+            if (x < 0 || x > width) return;
+            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
+            if (freq !== minDisplayFreq && freq !== maxDisplayFreq && x > width * 0.02 && x < width * 0.98) {
+                ctx.fillStyle = '#666'; ctx.font = '24px Arial'; ctx.textAlign = 'center';
+                ctx.fillText(freq >= 1000 ? `${Math.round(freq / 100) / 10}k` : freq, x, height - 80);
+            }
+        });
+
+        for (let db = 0; db >= this.dr; db -= 12) {
+            const y = height * (db / this.dr);
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+            if (db !== 0 && db !== this.dr) {
+                ctx.fillStyle = '#666'; ctx.font = '24px Arial'; ctx.textAlign = 'right';
+                ctx.fillText(`${db}dB`, 160, y + 12);
+            }
+        }
+
+        ctx.fillStyle = '#fff'; ctx.font = '28px Arial'; ctx.textAlign = 'center';
+        ctx.fillText('Frequency (Hz)', width / 2, height - 10);
+        ctx.save();
+        ctx.translate(40, height / 2); ctx.rotate(-Math.PI / 2);
+        ctx.fillText('Level (dB)', 0, 0);
+        ctx.restore();
     }
 
     cleanup() {

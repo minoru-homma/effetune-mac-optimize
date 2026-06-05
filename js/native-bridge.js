@@ -14,6 +14,24 @@
 
 export const isNativeHost = typeof window !== 'undefined' && window.__effetuneNativeHost === true;
 
+// Analyzer types rendered natively (Swift/Metal overlay) instead of by JS Canvas.
+// The matching plugin reports its on-screen rect via nativeBridge.setOverlayRect
+// and skips its own per-frame drawing; native stops pushing that analyzer's
+// meters (no IPC). `?nativeOverlay=0` forces the JS Canvas path for A/B testing.
+// Spectrum was already GPU-rendered (WebGPU) in the web view, so a native overlay
+// gave no CPU win — it stays on WebGPU. The win is for analyzers still drawn with
+// CPU Canvas 2D (Spectrogram's per-frame FFT + putImageData is the heaviest).
+const OVERLAY_TYPES = new Set([
+  'SpectrogramPlugin', 'OscilloscopePlugin', 'StereoMeterPlugin', 'LevelMeterPlugin',
+]);
+function _readOverlayFlag() {
+  try {
+    if (typeof window === 'undefined' || !window.location) return true;
+    return new URLSearchParams(window.location.search).get('nativeOverlay') !== '0';
+  } catch (_) { return true; }
+}
+const nativeOverlayEnabled = isNativeHost && _readOverlayFlag();
+
 // PEQ filter-type string -> Rust type_id (order matches FifteenBandPEQPlugin.FILTER_TYPES
 // and wasm-src/peq-dsp/src/design.rs FT_* constants).
 const PEQ_TYPE_ID = { pk: 0, lp: 1, hp: 2, ls: 3, hs: 4, bp: 5, no: 6, ap: 7 };
@@ -126,6 +144,26 @@ class NativeBridge {
   }
 
   stop() { this.post({ cmd: 'stop' }); }
+
+  // --- Native analyzer overlay (GPU rendering composited over the WebView) ---
+
+  // True if `type` should be rendered natively (and the plugin should suppress
+  // its own Canvas drawing + report its rect instead).
+  overlayManages(type) { return nativeOverlayEnabled && OVERLAY_TYPES.has(type); }
+
+  // Report an analyzer's on-screen rect (CSS px, web-viewport coords from
+  // getBoundingClientRect) so native can position its Metal layer over it.
+  // `config` carries type-specific numeric params (e.g. {dr} or {dt,dl,vo}).
+  setOverlayRect(id, type, rect, config) {
+    this.post({
+      cmd: 'setOverlayRect', id: String(id), type,
+      x: rect.x, y: rect.y, w: rect.w, h: rect.h,
+      cfg: config || {},
+    });
+  }
+
+  // Hide/destroy an analyzer's native overlay (collapsed / off-screen / removed).
+  removeOverlay(id) { this.post({ cmd: 'removeOverlay', id: String(id) }); }
 
   // Analyzer visibility gate: each analyzer reports when its draw loop starts/
   // stops (expanded + on-screen). Native only snapshots/pushes active ids and

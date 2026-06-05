@@ -323,6 +323,7 @@ class OscilloscopePlugin extends PluginBase {
       const graphContainer = document.createElement('div');
       graphContainer.className = 'graph-container';
   
+      this._graphContainer = graphContainer; // measured for the native Metal overlay
       this.canvas = document.createElement('canvas');
       this.canvas.width = 1024;
       this.canvas.height = 480;
@@ -558,7 +559,12 @@ class OscilloscopePlugin extends PluginBase {
                 this.stopAnimation();
                 return;
             }
-            this.drawWaveform();
+            if (this._overlayActive()) {
+                this._reportOverlayRect();
+            } else {
+                this._teardownOverlay();
+                this.drawWaveform();
+            }
             this.animationFrameId = requestAnimationFrame(animate);
         };
         if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, true);
@@ -571,6 +577,34 @@ class OscilloscopePlugin extends PluginBase {
             this.animationFrameId = null;
         }
         if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, false);
+        this._teardownOverlay();
+    }
+
+    // Native Metal overlay (macOS): native draws the waveform + grid; JS reports
+    // the rect + params (display time/level/offset). Trigger is handled natively.
+    _overlayActive() {
+        return !!(window.nativeBridge && window.nativeBridge.overlayManages
+            && window.nativeBridge.overlayManages('OscilloscopePlugin'))
+            && !!this._graphContainer && !!this.canvas;
+    }
+    _reportOverlayRect() {
+        if (!window.nativeBridge || !this._graphContainer) return;
+        const r = this._graphContainer.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return;
+        const cfgKey = `${this.displayTime}|${this.displayLevel}|${this.verticalOffset}`;
+        const last = this._lastOverlayRect;
+        if (last && last.x === r.left && last.y === r.top
+            && last.w === r.width && last.h === r.height && this._lastOverlayCfg === cfgKey) return;
+        this._lastOverlayRect = { x: r.left, y: r.top, w: r.width, h: r.height };
+        this._lastOverlayCfg = cfgKey;
+        window.nativeBridge.setOverlayRect(this.id, 'OscilloscopePlugin', this._lastOverlayRect,
+            { dt: this.displayTime, dl: this.displayLevel, vo: this.verticalOffset });
+    }
+    _teardownOverlay() {
+        if (!this._lastOverlayRect) return;
+        this._lastOverlayRect = null;
+        this._lastOverlayCfg = undefined;
+        if (window.nativeBridge) window.nativeBridge.removeOverlay(this.id);
     }
     // ---------------------------
     // drawWaveform: Render grid and waveform.

@@ -27,6 +27,9 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
     private var sampleRate: Double = 48000
     private var bufferFrames = 128
     public weak var webView: WKWebView?
+    // Native GPU overlay for analyzers (Spectrum, …). When an analyzer is
+    // rendered here, its meter push is skipped (no IPC) — see pushMeters.
+    private var overlay: AnalyzerOverlay?
     private var meterTimer: Timer?
     private var lastSpectrumTime: Double = 0 // for native FFT peak-decay timing
     // Plugin ids of analyzers whose UI is currently visible (expanded + on-screen).
@@ -35,6 +38,16 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
 
     public init(dspDir: String) {
         self.dspDir = dspDir
+    }
+
+    /// Create the native analyzer overlay on the host view (called by AppDelegate).
+    func attachOverlay(_ host: OverlayHostView) {
+        let o = AnalyzerOverlay(hostView: host)
+        o.moduleProvider = { [weak self] id in
+            self?.engine.chain?.effects.first { $0.pluginId == id }
+        }
+        o.sampleRateProvider = { [weak self] in self?.engine.sampleRate ?? 48000 }
+        overlay = o
     }
 
     public func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -57,8 +70,23 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
         case "readFile":        handleReadFile(dict)
         case "saveAppState":    handleSaveAppState(dict)
         case "loadAppState":    handleLoadAppState(dict)
+        case "setOverlayRect":
+            // JS reports a natively-rendered analyzer's web-viewport rect (CSS px)
+            // plus type-specific numeric params in `cfg`.
+            guard let id = idString(dict["id"]), let type = dict["type"] as? String,
+                  let x = (dict["x"] as? NSNumber)?.doubleValue, let y = (dict["y"] as? NSNumber)?.doubleValue,
+                  let w = (dict["w"] as? NSNumber)?.doubleValue, let h = (dict["h"] as? NSNumber)?.doubleValue
+            else { break }
+            var params: [String: Float] = [:]
+            if let cfg = dict["cfg"] as? [String: Any] {
+                for (k, v) in cfg { if let n = v as? NSNumber { params[k] = n.floatValue } }
+            }
+            overlay?.setRect(id: id, type: type, x: x, y: y, w: w, h: h, params: params)
+        case "removeOverlay":
+            if let id = idString(dict["id"]) { overlay?.remove(id: id) }
         case "stop":
             meterTimer?.invalidate(); meterTimer = nil
+            overlay?.removeAll()
             engine.stop()
         case "setActiveAnalyzers":
             let ids = (dict["ids"] as? [Any])?.compactMap { idString($0) } ?? []
@@ -260,6 +288,8 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
         var list: [[String: Any]] = []
         for e in chain.effects {
             guard let id = e.pluginId else { continue }
+            // Rendered natively (Metal overlay) → no meter push, no IPC.
+            if overlay?.hasActiveEntry(id) == true { continue }
             // Heavy analyzers only when visible; cheap scalar meters always.
             let isScalar = AudioBridge.scalarMeterKinds.contains(e.kind.id)
             guard activeIds.contains(id) || isScalar else { continue }

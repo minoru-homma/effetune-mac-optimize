@@ -189,6 +189,7 @@ class StereoMeterPlugin extends PluginBase {
     // Create the graph container and canvas.
     const graphContainer = document.createElement('div');
     graphContainer.className = 'graph-container';
+    this._graphContainer = graphContainer; // measured for the native Metal overlay
 
     this.canvas = document.createElement('canvas');
     this.canvas.width = 480;
@@ -265,7 +266,12 @@ class StereoMeterPlugin extends PluginBase {
             this.stopAnimation();
             return;
         }
-        this.drawMeter();
+        if (this._overlayActive()) {
+            this._reportOverlayRect();
+        } else {
+            this._teardownOverlay();
+            this.drawMeter();
+        }
         this.animationFrameId = requestAnimationFrame(animate);
     };
     if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, true);
@@ -278,6 +284,28 @@ class StereoMeterPlugin extends PluginBase {
         this.animationFrameId = null;
     }
     if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, false);
+    this._teardownOverlay();
+  }
+
+  // Native Metal overlay (macOS): native draws the Lissajous + curve + bars.
+  _overlayActive() {
+    return !!(window.nativeBridge && window.nativeBridge.overlayManages
+        && window.nativeBridge.overlayManages('StereoMeterPlugin'))
+        && !!this._graphContainer && !!this.canvas;
+  }
+  _reportOverlayRect() {
+    if (!window.nativeBridge || !this._graphContainer) return;
+    const r = this._graphContainer.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return;
+    const last = this._lastOverlayRect;
+    if (last && last.x === r.left && last.y === r.top && last.w === r.width && last.h === r.height) return;
+    this._lastOverlayRect = { x: r.left, y: r.top, w: r.width, h: r.height };
+    window.nativeBridge.setOverlayRect(this.id, 'StereoMeterPlugin', this._lastOverlayRect, {});
+  }
+  _teardownOverlay() {
+    if (!this._lastOverlayRect) return;
+    this._lastOverlayRect = null;
+    if (window.nativeBridge) window.nativeBridge.removeOverlay(this.id);
   }
 
   drawMeter() {

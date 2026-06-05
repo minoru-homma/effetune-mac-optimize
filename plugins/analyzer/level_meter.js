@@ -290,7 +290,12 @@ class LevelMeterPlugin extends PluginBase {
                 this.stopAnimation();
                 return;
             }
-            this.updateMeter();
+            if (this._overlayActive()) {
+                this._reportOverlayRect();
+            } else {
+                this._teardownOverlay();
+                this.updateMeter();
+            }
             this.animationFrameId = requestAnimationFrame(animate);
         };
         if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, true);
@@ -303,6 +308,28 @@ class LevelMeterPlugin extends PluginBase {
             this.animationFrameId = null;
         }
         if (window.nativeBridge) window.nativeBridge.setAnalyzerActive(this.id, false);
+        this._teardownOverlay();
+    }
+
+    // Native Metal overlay (macOS): native draws the bars + peak markers + grid.
+    _overlayActive() {
+        return !!(window.nativeBridge && window.nativeBridge.overlayManages
+            && window.nativeBridge.overlayManages('LevelMeterPlugin'))
+            && !!this.foregroundCanvas;
+    }
+    _reportOverlayRect() {
+        if (!window.nativeBridge || !this.foregroundCanvas) return;
+        const r = this.foregroundCanvas.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return;
+        const last = this._lastOverlayRect;
+        if (last && last.x === r.left && last.y === r.top && last.w === r.width && last.h === r.height) return;
+        this._lastOverlayRect = { x: r.left, y: r.top, w: r.width, h: r.height };
+        window.nativeBridge.setOverlayRect(this.id, 'LevelMeterPlugin', this._lastOverlayRect, {});
+    }
+    _teardownOverlay() {
+        if (!this._lastOverlayRect) return;
+        this._lastOverlayRect = null;
+        if (window.nativeBridge) window.nativeBridge.removeOverlay(this.id);
     }
 
     // Clean up resources when plugin is removed

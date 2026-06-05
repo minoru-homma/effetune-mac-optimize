@@ -76,14 +76,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
         window.title = "EffeTune (Native)"
-        window.contentView = webView
+
+        // Container hosts the WKWebView plus a transparent native overlay stacked
+        // above it for GPU-rendered analyzers (see AnalyzerOverlay).
+        let container = NSView(frame: rect)
+        container.autoresizesSubviews = true
+        webView.frame = container.bounds
+        webView.autoresizingMask = [.width, .height]
+        container.addSubview(webView)
+        let overlayHost = OverlayHostView(frame: container.bounds)
+        overlayHost.autoresizingMask = [.width, .height]
+        overlayHost.wantsLayer = true
+        overlayHost.layer?.masksToBounds = true
+        container.addSubview(overlayHost, positioned: .above, relativeTo: webView)
+        bridge.attachOverlay(overlayHost)
+
+        window.contentView = container
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
         let indexPath = (webRoot as NSString).appendingPathComponent("effetune.html")
         if FileManager.default.fileExists(atPath: indexPath) {
-            webView.load(URLRequest(url: URL(string: WebSchemeHandler.baseURL + "effetune.html")!))
+            // Optional query suffix for testing (e.g. EFFETUNE_URL_QUERY="nativeOverlay=0").
+            var urlStr = WebSchemeHandler.baseURL + "effetune.html"
+            if let q = ProcessInfo.processInfo.environment["EFFETUNE_URL_QUERY"], !q.isEmpty { urlStr += "?" + q }
+            webView.load(URLRequest(url: URL(string: urlStr)!))
         } else {
             let html = "<h2 style='font-family:sans-serif'>EffeTune native host</h2>" +
                        "<p>UI not found. Set EFFETUNE_WEBROOT to the repo root (found: \(webRoot)).</p>"
