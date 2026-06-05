@@ -591,14 +591,19 @@ class OscilloscopePlugin extends PluginBase {
         if (!window.nativeBridge || !this._graphContainer) return;
         const r = this._graphContainer.getBoundingClientRect();
         if (r.width <= 0 || r.height <= 0) return;
-        const cfgKey = `${this.displayTime}|${this.displayLevel}|${this.verticalOffset}`;
+        // Native handles edge detection; encode the string enums as numbers
+        // (tm 0=Auto/1=Normal, te 1=Rising/0=Falling).
+        const tm = this.triggerMode === 'Normal' ? 1 : 0;
+        const te = this.triggerEdge === 'Falling' ? 0 : 1;
+        const cfgKey = `${this.displayTime}|${this.displayLevel}|${this.verticalOffset}|${tm}|${this.triggerLevel}|${te}|${this.holdoff}`;
         const last = this._lastOverlayRect;
         if (last && last.x === r.left && last.y === r.top
             && last.w === r.width && last.h === r.height && this._lastOverlayCfg === cfgKey) return;
         this._lastOverlayRect = { x: r.left, y: r.top, w: r.width, h: r.height };
         this._lastOverlayCfg = cfgKey;
         window.nativeBridge.setOverlayRect(this.id, 'OscilloscopePlugin', this._lastOverlayRect,
-            { dt: this.displayTime, dl: this.displayLevel, vo: this.verticalOffset });
+            { dt: this.displayTime, dl: this.displayLevel, vo: this.verticalOffset,
+              tm, tl: this.triggerLevel, te, ho: this.holdoff });
     }
     _teardownOverlay() {
         if (!this._lastOverlayRect) return;

@@ -11,7 +11,7 @@ final class StereoMeterRenderer: AnalyzerRenderer {
     private let ctx: MetalContext
     private let presenter: SurfacePresenter
 
-    private let window = 8192
+    private let maxWindow = 16384           // native tap ring size
     private var scatterBuf: MTLBuffer?      // float2 × window
     private var peakBuf: MTLBuffer?         // float2 × 361 (closed curve)
     private var scatterCount = 0
@@ -40,7 +40,10 @@ final class StereoMeterRenderer: AnalyzerRenderer {
         lastPosition = pos
         lastRenderTime = now
 
-        guard let snap = module.stereoSnapshot(window: window) else { return }
+        // Window(ms) control → analysis-window length (capped to the tap ring).
+        let wt = Double(params["wt"] ?? 0.0853)   // ≈8192 @ 96k default
+        let win = max(64, min(maxWindow, Int(wt * sampleRate)))
+        guard let snap = module.stereoSnapshot(window: win) else { return }
         let scale = presenter.layer.contentsScale
         let drawW = Int((presenter.layer.bounds.width * scale).rounded())
         let drawH = Int((presenter.layer.bounds.height * scale).rounded())

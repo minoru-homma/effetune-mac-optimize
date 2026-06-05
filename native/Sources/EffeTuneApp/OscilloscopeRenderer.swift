@@ -37,6 +37,9 @@ final class OscilloscopeRenderer: AnalyzerRenderer {
         let dt = Double(params["dt"] ?? 0.01)        // display time (s)
         let dl = params["dl"] ?? 0                   // display level (dB)
         let vo = params["vo"] ?? 0                   // vertical offset (-1..1)
+        let tl = params["tl"] ?? 0                   // trigger level (-1..1)
+        let teRising = (params["te"] ?? 1) >= 0.5    // edge: rising vs falling
+        let normalMode = (params["tm"] ?? 0) >= 0.5  // Normal (freeze w/o trigger) vs Auto
         let now = CACurrentMediaTime()
         if lastRenderTime > 0 && now - lastRenderTime < minFrameInterval - 0.002 { return }
         let pos = module.spectrumPosition
@@ -53,13 +56,28 @@ final class OscilloscopeRenderer: AnalyzerRenderer {
         let drawH = Int((presenter.layer.bounds.height * scale).rounded())
         guard drawW > 1, drawH > 0 else { return }
 
-        // Resample the latest `displaySamples` (ending at the write head) to drawW points.
+        // Edge trigger: anchor the display at the most recent rising/falling
+        // crossing of `tl` whose full window still fits in the ring, so periodic
+        // signals stay stationary. Auto = free-run if none found; Normal = freeze.
+        let base = snap.position - displaySamples       // latest trigger that keeps the window
+        var start = (base + cap) % cap                   // free-run fallback
+        var found = false
+        let searchBack = min(cap - displaySamples - 2, Int(sampleRate * 0.1))
+        var k = 0
+        while k < searchBack {
+            let i = ((base - k) % cap + cap) % cap
+            let prev = ring[((i - 1) % cap + cap) % cap], cur = ring[i]
+            if teRising ? (prev < tl && cur >= tl) : (prev > tl && cur <= tl) { start = i; found = true; break }
+            k += 1
+        }
+        if normalMode && !found { return }   // freeze: keep the previously shown surface
+
+        // Resample `displaySamples` from the trigger to drawW points.
         let M = drawW
         if waveCount != M || bufWave == nil {
             bufWave = ctx.device.makeBuffer(length: M * 4, options: .storageModeShared); waveCount = M
         }
         guard let wave = bufWave else { return }
-        let start = (snap.position - displaySamples + cap) % cap
         let wp = wave.contents().bindMemory(to: Float.self, capacity: M)
         let denom = Double(max(1, M - 1))
         for x in 0..<M {

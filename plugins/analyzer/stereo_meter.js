@@ -298,13 +298,16 @@ class StereoMeterPlugin extends PluginBase {
     const r = this._graphContainer.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) return;
     const last = this._lastOverlayRect;
-    if (last && last.x === r.left && last.y === r.top && last.w === r.width && last.h === r.height) return;
+    if (last && last.x === r.left && last.y === r.top
+        && last.w === r.width && last.h === r.height && this._lastOverlayWt === this.windowTime) return;
     this._lastOverlayRect = { x: r.left, y: r.top, w: r.width, h: r.height };
-    window.nativeBridge.setOverlayRect(this.id, 'StereoMeterPlugin', this._lastOverlayRect, {});
+    this._lastOverlayWt = this.windowTime;
+    window.nativeBridge.setOverlayRect(this.id, 'StereoMeterPlugin', this._lastOverlayRect, { wt: this.windowTime });
   }
   _teardownOverlay() {
     if (!this._lastOverlayRect) return;
     this._lastOverlayRect = null;
+    this._lastOverlayWt = undefined;
     if (window.nativeBridge) window.nativeBridge.removeOverlay(this.id);
   }
 
