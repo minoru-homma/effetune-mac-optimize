@@ -846,6 +846,10 @@ export class UIManager {
         this.openMusicButton = document.getElementById('openMusicButton');
 
         if (this.openMusicButton) {
+            if (window.__effetuneNativeHost) {
+                this.openMusicButton.style.display = 'none';
+                return;
+            }
             this.openMusicButton.addEventListener('click', () => {
                 // Check if running in Electron environment
                 const isElectron = window.electronIntegration && window.electronIntegration.isElectronEnvironment();

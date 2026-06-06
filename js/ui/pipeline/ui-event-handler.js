@@ -337,7 +337,7 @@ export class UIEventHandler {
                         reader.readAsText(presetFiles[0]);
                     }
                     // Process music files (if any and no preset files)
-                    else if (musicFiles.length > 0) {
+                    else if (musicFiles.length > 0 && !window.__effetuneNativeHost) {
                         // For browser environment, create audio player directly with the files
                         if (window.uiManager) {
                             // Pass the File objects directly to preserve original file names

@@ -26,6 +26,8 @@ export class FileProcessor {
      * @param {HTMLElement} pipelineElement - The pipeline container element
      */
     createFileDropArea(pipelineElement) {
+        if (window.__effetuneNativeHost) return;
+
         // Create file input element
         const fileInput = document.createElement('input');
         fileInput.type = 'file';
