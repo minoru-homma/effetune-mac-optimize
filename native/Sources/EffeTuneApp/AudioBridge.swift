@@ -27,6 +27,8 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
     private var sampleRate: Double = 48000
     private var bufferFrames = 128
     public weak var webView: WKWebView?
+    // Host window; its content width is locked to the fixed-width UI (see resizeWindow).
+    public weak var window: NSWindow?
     // Native GPU overlay for analyzers (Spectrum, …). When an analyzer is
     // rendered here, its meter push is skipped (no IPC) — see pushMeters.
     private var overlay: AnalyzerOverlay?
@@ -111,9 +113,29 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
                 m.enabled = (desc["enabled"] as? Bool) ?? true
                 apply(desc, to: m)
             }
+        case "resizeWindow":
+            if let w = (dict["width"] as? NSNumber)?.doubleValue { applyWindowWidth(w) }
         default:
             break
         }
+    }
+
+    /// Lock the window's content width to the fixed-width UI (height stays resizable).
+    /// Width is clamped to the active display; sidebar collapse/expand drives the value.
+    /// Called from WKScriptMessageHandler which always runs on the main thread, so
+    /// window manipulation is safe to do synchronously here.
+    private func applyWindowWidth(_ requested: Double) {
+        guard let window = self.window else { return }
+        let req = CGFloat(requested)
+        let screenW = window.screen?.visibleFrame.width
+            ?? NSScreen.main?.visibleFrame.width ?? req
+        let width = min(req, screenW)
+        let curH = window.contentRect(forFrameRect: window.frame).height
+        window.contentMinSize = NSSize(width: width, height: 360)
+        window.contentMaxSize = NSSize(width: width, height: .greatestFiniteMagnitude)
+        // setContentSize keeps the bottom-left origin: a width-only change keeps the
+        // top-left corner fixed and grows/shrinks to the right.
+        window.setContentSize(NSSize(width: width, height: curH))
     }
 
     // MARK: file dialogs / IO (preset import/export). Async request/reply: JS

@@ -145,6 +145,9 @@ class NativeBridge {
 
   stop() { this.post({ cmd: 'stop' }); }
 
+  // Native window: lock content width to the fixed-width UI (height stays free).
+  resizeWindow(width) { this.post({ cmd: 'resizeWindow', width: Math.round(width) }); }
+
   // --- Native analyzer overlay (GPU rendering composited over the WebView) ---
 
   // True if `type` should be rendered natively (and the plugin should suppress

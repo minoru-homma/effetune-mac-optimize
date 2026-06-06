@@ -71,11 +71,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         bridge.webView = webView
         setupMenu()
 
-        let rect = NSRect(x: 0, y: 0, width: 1280, height: 840)
+        // Initial width matches the sidebar-expanded UI; JS reconfirms and locks the
+        // width on load (see CollapseManager.reportNativeWindowWidth / AudioBridge).
+        let rect = NSRect(x: 0, y: 0, width: 1424, height: 840)
         window = NSWindow(contentRect: rect,
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
         window.title = "EffeTune (Native)"
+        bridge.window = window
 
         // Container hosts the WKWebView plus a transparent native overlay stacked
         // above it for GPU-rendered analyzers (see AnalyzerOverlay).

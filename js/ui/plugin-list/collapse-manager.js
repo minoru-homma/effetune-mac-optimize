@@ -1,3 +1,5 @@
+import { isNativeHost, nativeBridge } from '../../native-bridge.js';
+
 export class CollapseManager {
     constructor(pluginListManager) {
         this.pluginListManager = pluginListManager;
@@ -26,7 +28,51 @@ export class CollapseManager {
         // Initialize window width check after the app is fully loaded
         window.addEventListener('load', () => {
             this.checkWindowWidthAndAdjust();
+            this.reportNativeWindowWidth();
         });
+    }
+
+    // Report the native window width derived purely from the sidebar state
+    // (single-column base; column count is intentionally ignored so the window
+    // stays fixed-width and only tracks collapse/expand). Native locks its
+    // content width to this value. No-op outside the native host.
+    reportNativeWindowWidth() {
+        if (!isNativeHost || !nativeBridge) return;
+        const sidebar = this.pluginList ? this.pluginList.offsetWidth : 300;
+        const gap = 20;
+        const vp = parseInt((document.querySelector('meta[name="viewport"]')
+                     ?.getAttribute('content') || '').match(/width=(\d+)/)?.[1] || '1144', 10);
+        const scrollW = document.body.scrollWidth;
+        // Permanent vertical scrollbar (macOS "Always show scrollbars") reduces the
+        // html element's client width relative to the viewport. body { width: max-content }
+        // ignores this, so body overflows html by exactly the scrollbar width.
+        // Adding this offset to the window width gives body enough space to fit without
+        // a horizontal scrollbar. Re-measured each call so it adapts to scrollbar presence.
+        const vScrollbarW = Math.max(0, window.innerWidth - document.documentElement.clientWidth);
+        let width;
+        if (this.isCollapsed) {
+            // DOM still expanded: measure the raw body content width, cache it
+            this._expandedScrollWidth = scrollW;
+            width = scrollW - sidebar - gap + vScrollbarW;
+        } else {
+            // Expanding or initial load: restore cached content width + current scrollbar offset
+            const targetScrollW = this._expandedScrollWidth ?? scrollW;
+            this._expandedScrollWidth = targetScrollW;
+            width = targetScrollW + vScrollbarW;
+        }
+        nativeBridge.resizeWindow(Math.max(width, vp + vScrollbarW));
+    }
+
+    // After a collapse/expand animation completes, measure the actual body.scrollWidth
+    // and fine-tune the window width. The pre-animation estimate may be off by a few px
+    // (e.g. collapsed state CSS margin-left shifts layout slightly).
+    _finalizeNativeWindowWidth() {
+        if (!isNativeHost || !nativeBridge) return;
+        const vp = parseInt((document.querySelector('meta[name="viewport"]')
+                     ?.getAttribute('content') || '').match(/width=(\d+)/)?.[1] || '1144', 10);
+        const vScrollbarW = Math.max(0, window.innerWidth - document.documentElement.clientWidth);
+        const scrollW = document.body.scrollWidth;
+        nativeBridge.resizeWindow(Math.max(scrollW + vScrollbarW, vp + vScrollbarW));
     }
 
     // Load collapsed category state from localStorage
@@ -96,7 +142,25 @@ export class CollapseManager {
     // Toggle the collapsed state of the plugin list
     togglePluginListCollapse() {
         this.isCollapsed = !this.isCollapsed;
-        
+        // Resize the native window to match the new sidebar state immediately
+        // (width is deterministic from isCollapsed; no need to await the animation).
+        if (!this.isCollapsed) {
+            // Expanding: grow window immediately so the sidebar has space to slide into,
+            // then fine-tune to exact fit once the layout settles.
+            this.reportNativeWindowWidth();
+        }
+        // 400ms after toggle (after the 300ms CSS transition settles):
+        // • Collapse: first resize (window stays wide during slide, then shrinks to fit).
+        // • Expand: fine-tune the quick estimate and re-anchor the pull tab.
+        //   The expand resize (from reportNativeWindowWidth) fires before the CSS classes
+        //   change, so updatePositions() runs with the sidebar still in collapsed geometry;
+        //   the rAF loop then stops when handleTransitionEnd is cleared by that resize.
+        //   Calling updatePositions() here (after animation completes) corrects the tab.
+        setTimeout(() => {
+            this._finalizeNativeWindowWidth();
+            this.updatePositions();
+        }, 400);
+
         const pipeline = document.getElementById('pipeline');
         if (!this.pluginList || !this.pullTab || !this.mainContainer || !pipeline) return;
 
@@ -109,7 +173,7 @@ export class CollapseManager {
             this.pluginList.removeEventListener('transitionend', this.handleTransitionEnd);
         }
 
-        // --- Define transitionend handler --- 
+        // --- Define transitionend handler ---
         this.handleTransitionEnd = (event) => {
             // Check if the transition that ended was for the transform property
             if (event.propertyName === 'transform' && event.target === this.pluginList) {
@@ -119,13 +183,12 @@ export class CollapseManager {
                     this.animationFrameId = null;
                 }
                 // Set the final static positions explicitly
-                this.updatePositions(); 
+                this.updatePositions();
                 // Clean up the listener itself
                 this.pluginList.removeEventListener('transitionend', this.handleTransitionEnd);
                 this.handleTransitionEnd = null; // Reset handler reference
             }
         };
-        
         // Add the listener before triggering the transition
         this.pluginList.addEventListener('transitionend', this.handleTransitionEnd);
 
@@ -326,6 +389,9 @@ export class CollapseManager {
 
     // Check and adjust the collapse state based on pipeline position relative to window edge
     checkWindowWidthAndAdjust() {
+        // On the native host the window tracks the sidebar (see reportNativeWindowWidth);
+        // auto-collapsing on window width would feed back into the resize it just caused.
+        if (isNativeHost) return;
         // Only proceed if the app is fully initialized
         if (!window.app || !window.app.initialized) {
             return;
