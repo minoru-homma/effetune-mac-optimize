@@ -179,6 +179,8 @@ export class FileProcessor {
      * DO NOT MODIFY THIS BEHAVIOR without thorough testing of all drag & drop scenarios!
      */
     setupFileDropHandlers() {
+        if (!this.dropArea) return;
+
         // Handle file drag and drop for audio files only
         this.dropArea.addEventListener('dragenter', (e) => {
             // Skip in Electron environment
