@@ -37,6 +37,10 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
     // Plugin ids of analyzers whose UI is currently visible (expanded + on-screen).
     // Only these get snapshots/pushes; the meter timer idles when this is empty.
     private var activeIds: Set<String> = []
+    // Backpressure: skip the next push if the previous callAsyncJavaScript hasn't
+    // completed yet. Prevents WKWebView internal tracking objects from piling up
+    // when JS processing falls behind the 30 Hz timer rate.
+    private var meterPushPending = false
 
     public init(dspDir: String) {
         self.dspDir = dspDir
@@ -318,6 +322,7 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
     }
 
     private func pushMeters() {
+        autoreleasepool {
         guard let chain = engine.chain else { return }
         let time = CACurrentMediaTime()
         var list: [[String: Any]] = []
@@ -376,15 +381,18 @@ public final class AudioBridge: NSObject, WKScriptMessageHandler {
             if let m = meas { list.append(["id": id, "measurements": m]) }
         }
         guard !list.isEmpty,
+              !meterPushPending,
               let data = try? JSONSerialization.data(withJSONObject: list),
               let json = String(data: data, encoding: .utf8) else { return }
         // Pass ONE JSON string argument (cheap to marshal) + JSON.parse in JS
         // (fast native). Passing the nested array directly made callAsyncJavaScript
         // marshal it element-by-element into JSValues (~2.5ms/call at 30Hz ≈ 7.5%).
+        meterPushPending = true
         webView?.callAsyncJavaScript(
             "window.__effetuneOnMeters && window.__effetuneOnMeters(json);",
             arguments: ["json": json],
-            in: nil, in: .page, completionHandler: nil)
+            in: nil, in: .page) { [weak self] _ in self?.meterPushPending = false }
+        } // autoreleasepool
     }
 
     /// Push the CoreAudio device list to the renderer (window.__effetuneOnDevices).

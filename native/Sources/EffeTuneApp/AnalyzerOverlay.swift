@@ -164,13 +164,18 @@ final class AnalyzerOverlay {
     /// Display-synced render of every active overlay. Runs on the CVDisplayLink
     /// thread; touches only thread-safe reads (snapshotted entry list, engine
     /// chain reference, immutable per-frame layer geometry).
+    /// autoreleasepool is required: Metal API calls (makeCommandBuffer etc.) return
+    /// ObjC autoreleased objects. The CVDisplayLink thread has no RunLoop to drain
+    /// the pool automatically, so without this wrapper they accumulate indefinitely.
     private func renderTick() {
-        lock.lock(); let items = Array(entries.values); lock.unlock()
-        if items.isEmpty { return }
-        let sr = sampleRateProvider?() ?? 48000
-        for e in items {
-            guard let module = moduleProvider?(e.id) else { continue }
-            e.renderer.render(module: module, params: e.params, sampleRate: sr)
+        autoreleasepool {
+            lock.lock(); let items = Array(entries.values); lock.unlock()
+            if items.isEmpty { return }
+            let sr = sampleRateProvider?() ?? 48000
+            for e in items {
+                guard let module = moduleProvider?(e.id) else { continue }
+                e.renderer.render(module: module, params: e.params, sampleRate: sr)
+            }
         }
     }
 }
