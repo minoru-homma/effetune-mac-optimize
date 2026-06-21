@@ -45,8 +45,27 @@ export class AudioIOManager {
         this._pollDeviceWasAbsent = false;
         // Guard against overlapping poll tick executions
         this._pollRunning = false;
+        // Registered MediaStreamTrack 'ended' listeners for the live input stream,
+        // so they can be removed when the stream is replaced or torn down.
+        this._inputTrackWatchers = [];
     }
-    
+
+    /**
+     * Normalize a saved device id.  Chromium exposes a virtual device whose
+     * deviceId is the literal string 'default' (the option the user picks for
+     * "Default" in the config dialog), and that virtual entry never disappears
+     * from enumerateDevices() — it just remaps to the current system default.
+     * Treating 'default' (or an empty value) as a concrete saved id breaks
+     * replug detection and forces a fragile getUserMedia({ deviceId:{ exact:'default' }})
+     * constraint.  Fold all of those to null so the clean "system default" path
+     * (no deviceId constraint, presence-by-any-labeled-input) is used instead.
+     * @param {string|null|undefined} id
+     * @returns {string|null} the concrete device id, or null for "system default"
+     */
+    static normalizeDeviceId(id) {
+        return id && id !== 'default' ? id : null;
+    }
+
     /**
      * Initialize audio input (microphone)
      * @returns {Promise<string>} - Empty string on success, error message on failure
@@ -70,8 +89,9 @@ export class AudioIOManager {
             // If running in Electron, try to use saved audio preferences
             if (window.electronAPI && window.electronIntegration) {
                 const preferences = await window.electronIntegration.loadAudioPreferences();
-                if (preferences && preferences.inputDeviceId) {
-                    audioConstraints.deviceId = { exact: preferences.inputDeviceId };
+                const savedInputId = AudioIOManager.normalizeDeviceId(preferences?.inputDeviceId);
+                if (savedInputId) {
+                    audioConstraints.deviceId = { exact: savedInputId };
                 } else {
                     console.log('No audio preferences found or no input device specified, using default audio input');
                     // Use default input device by not specifying deviceId
@@ -164,6 +184,10 @@ export class AudioIOManager {
             // If we have microphone access, create source from stream
             if (usingMicrophoneInput && this.stream) {
                 this.sourceNode = this.contextManager.audioContext.createMediaStreamSource(this.stream);
+                // Watch the live input track so a device disconnect (e.g. USB
+                // reset) is detected even when enumerateDevices() presence does
+                // not change (default-device + multiple inputs case).
+                this._attachInputTrackWatchers(this.stream);
             } else {
                 // No microphone access, create a stereo-compatible silent source as a fallback
                 console.log('Creating stereo-compatible silent source as fallback');
@@ -228,7 +252,48 @@ export class AudioIOManager {
      * @param {string|null} preferredDeviceId - saved input device id, or null for default
      * @returns {Promise<{stream: MediaStream|null, error: Error|null}>}
      */
+    /**
+     * Attach 'ended' listeners to the audio tracks of the live input stream.
+     * A USB reset (or any device removal backing the current stream) ends the
+     * track; this is the only reliable signal when the user picked "Default"
+     * and another input still exists, because the virtual 'default' device
+     * never disappears from enumerateDevices().  The handler defers to the
+     * app-level debounced recovery (shared with the devicechange path), which
+     * carries the cooldown / startup-grace / reset-in-progress guards.
+     * @param {MediaStream|null} stream
+     */
+    _attachInputTrackWatchers(stream) {
+        // Always clear any prior registrations first so watchers cannot leak
+        // across stream swaps.
+        this._detachInputTrackWatchers();
+        if (!stream) return; // silent-gain fallback (no real device) — nothing to watch
+        try {
+            for (const track of stream.getAudioTracks()) {
+                const handler = () => {
+                    hdmiDebug('TRACK', 'input track ended — triggering recovery');
+                    try { window.app?._onInputTrackLost?.(); } catch (_) { /* best-effort */ }
+                };
+                track.addEventListener('ended', handler);
+                this._inputTrackWatchers.push({ track, handler });
+            }
+        } catch (_) { /* watchers are best-effort, never break acquisition */ }
+    }
+
+    /**
+     * Remove all previously registered input-track 'ended' listeners.
+     */
+    _detachInputTrackWatchers() {
+        for (const { track, handler } of this._inputTrackWatchers) {
+            try { track.removeEventListener('ended', handler); } catch (_) { /* ignore */ }
+        }
+        this._inputTrackWatchers = [];
+    }
+
     async _acquireMicStream(preferredDeviceId) {
+        // Defensive final line: callers should already pass a normalized id, but
+        // fold a stray literal 'default' to null so we never bind the fragile
+        // { exact: 'default' } constraint here.
+        preferredDeviceId = AudioIOManager.normalizeDeviceId(preferredDeviceId);
         const audioConstraints = {
             echoCancellation: false,
             noiseSuppression: false,
@@ -811,6 +876,11 @@ export class AudioIOManager {
                 return false;
             }
             this.stream = stream;
+            // Re-point the track watchers at the new stream BEFORE stopping the
+            // old tracks below (stop() fires 'ended'; detaching first avoids a
+            // spurious recovery trigger).  _attachInputTrackWatchers detaches the
+            // prior registrations as its first step.
+            this._attachInputTrackWatchers(stream);
             // Defensive: the old node was disconnected when the player took
             // over, but disconnect() again so a lingering edge cannot survive
             // the swap (symmetric with the non-player branch below).
@@ -831,6 +901,9 @@ export class AudioIOManager {
         }
         this._warnIfMicFallback(usedFallback);
 
+        // Detach the old track watchers before stopping the old tracks: stop()
+        // fires 'ended', which would otherwise trip a spurious recovery.
+        this._detachInputTrackWatchers();
         // Stop the old (dead) tracks and detach the old source.  This also
         // correctly handles the silent-gain fallback case: oldStream is null and
         // oldSource is a GainNode, so only disconnect() runs (no tracks to stop).
@@ -851,6 +924,8 @@ export class AudioIOManager {
             } else {
                 this.sourceNode.connect(this.contextManager.workletNode);
             }
+            // Watch the new live stream so a subsequent device loss is caught.
+            this._attachInputTrackWatchers(stream);
         } catch (e) {
             hdmiDebug('REAPPLY-IN', `wire failed: ${e.message ?? e} → false`);
             return false;
@@ -1092,7 +1167,9 @@ export class AudioIOManager {
             }
         }
         
-        // Stop all media tracks
+        // Stop all media tracks.  Detach the track watchers first so the
+        // stop()-induced 'ended' events do not trip a spurious recovery.
+        this._detachInputTrackWatchers();
         if (this.stream) {
             this.stream.getTracks().forEach(track => track.stop());
             this.stream = null;

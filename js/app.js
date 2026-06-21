@@ -1,5 +1,6 @@
 import { PluginManager } from './plugin-manager.js';
 import { AudioManager, hdmiDebug } from './audio-manager.js';
+import { AudioIOManager } from './audio/audio-io-manager.js';
 import { UIManager } from './ui-manager.js';
 import { electronIntegration } from './electron-integration.js';
 import { applySerializedState } from './utils/serialization-utils.js';
@@ -1064,6 +1065,13 @@ class App {
         }
         if (!prefs) return;
 
+        // Normalize the literal 'default' (and empty) saved id to null so the
+        // "system default" path is used: presence-by-any-labeled-input and a
+        // constraint-free re-acquire.  The virtual 'default' device never leaves
+        // enumerateDevices(), so treating it as a concrete id breaks replug
+        // detection.
+        const savedInputId = AudioIOManager.normalizeDeviceId(prefs.inputDeviceId);
+
         let devices;
         try {
             devices = await navigator.mediaDevices.enumerateDevices();
@@ -1081,14 +1089,14 @@ class App {
         let foundByLabel = false;
         let present;
         let preferredDeviceId;
-        if (prefs.inputDeviceId) {
-            let found = inputs.find(d => d.deviceId === prefs.inputDeviceId);
+        if (savedInputId) {
+            let found = inputs.find(d => d.deviceId === savedInputId);
             if (!found && prefs.inputDeviceLabel) {
                 found = inputs.find(d => d.label === prefs.inputDeviceLabel);
                 foundByLabel = !!found;
             }
             present = !!found;
-            preferredDeviceId = found?.deviceId ?? prefs.inputDeviceId;
+            preferredDeviceId = found?.deviceId ?? savedInputId;
         } else {
             present = inputs.some(d => d.label);
             preferredDeviceId = null;
@@ -1136,7 +1144,7 @@ class App {
             let devices2;
             try { devices2 = await navigator.mediaDevices.enumerateDevices(); } catch (e) { return; }
             const inputs2 = devices2.filter(d => d.kind === 'audioinput');
-            const stillPresent = prefs.inputDeviceId
+            const stillPresent = savedInputId
                 ? inputs2.some(d => d.deviceId === preferredDeviceId ||
                     (prefs.inputDeviceLabel && d.label === prefs.inputDeviceLabel))
                 : inputs2.some(d => d.label);
@@ -1172,10 +1180,10 @@ class App {
             // enumeration: a USB id can change again across the oscillation
             // window, so the 3 s-old preferredDeviceId may now be stale.
             let freshPreferredId;
-            if (prefs.inputDeviceId) {
-                const f = inputs2.find(d => d.deviceId === prefs.inputDeviceId)
+            if (savedInputId) {
+                const f = inputs2.find(d => d.deviceId === savedInputId)
                     || (prefs.inputDeviceLabel ? inputs2.find(d => d.label === prefs.inputDeviceLabel) : null);
-                freshPreferredId = f?.deviceId ?? prefs.inputDeviceId;
+                freshPreferredId = f?.deviceId ?? savedInputId;
             } else {
                 freshPreferredId = null;
             }
@@ -1203,6 +1211,34 @@ class App {
                 }
             }
         }, 3000);
+    }
+
+    /**
+     * Recovery entry point for a lost input MediaStreamTrack ('ended').
+     * Fired by the AudioIOManager track watchers when the device backing the
+     * live input stream disappears (e.g. a USB reset).  This is the only
+     * reliable signal in the "Default" + multiple-inputs case, where the
+     * virtual 'default' device never leaves enumerateDevices() so the
+     * devicechange handler's presence proxy never transitions.
+     *
+     * We force the absent flag so the shared handler takes the recovery path
+     * even when presence-by-any-labeled-input stays true, then delegate to the
+     * public handler — reusing its in-progress guard and the impl's debounce /
+     * startup-grace / cooldown / reset-in-progress guards (so it cannot double
+     * up with a concurrent devicechange recovery).
+     */
+    _onInputTrackLost() {
+        if (this.audioManager?._resetInProgress) {
+            hdmiDebug('IN-HANDLER', 'track-lost ignored (reset in progress)');
+            return;
+        }
+        hdmiDebug('IN-HANDLER', 'track-lost — forcing recovery path');
+        this._inputDeviceWasAbsent = true;
+        // Fire-and-forget: handleInputDeviceChange manages its own async lifetime
+        // and guards; we must not block the track 'ended' event dispatch.
+        Promise.resolve()
+            .then(() => this.handleInputDeviceChange())
+            .catch(err => console.warn('[_onInputTrackLost] recovery failed:', err));
     }
 
     /**
