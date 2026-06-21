@@ -4,6 +4,7 @@ import { AudioIOManager } from './audio/audio-io-manager.js';
 import { UIManager } from './ui-manager.js';
 import { electronIntegration } from './electron-integration.js';
 import { applySerializedState } from './utils/serialization-utils.js';
+import { startRendererWatchdogHeartbeat } from './electron-watchdog.js';
 
 // Make electronIntegration globally accessible first
 window.electronIntegration = electronIntegration;
@@ -306,7 +307,14 @@ class App {
             // Initialize pipeline state and build audio pipeline as a single operation
             // This ensures plugins are created with AudioWorklet already initialized
             await this.initializeAndBuildPipeline();
-            
+
+            // All updatePlugins messages from the startup sequence (saved state,
+            // startup/CLI/tray preset) have been posted to the worklet by now.
+            // The output gain has been held at 0 since initAudioOutput so nothing
+            // could leak through; fade it in to make the configured pipeline
+            // audible without any click.
+            this.audioManager.fadeInOutput();
+
             // Set up event listeners and finalize initialization
             this.setupEventListeners();
             
@@ -1338,6 +1346,95 @@ class App {
     }
 
     /**
+     * Save current pipeline state to file (best-effort, non-blocking on failure).
+     * Used before risky audio operations so a watchdog-triggered force-relaunch
+     * still preserves the user's pipeline configuration.
+     */
+    async _savePipelineStateBeforeRisk() {
+        try {
+            const core = window.pipelineManager?.core;
+            if (window.electronAPI?.savePipelineStateToFile && core && this.audioManager) {
+                const serialize = (pl) => pl
+                    ? pl.map(p => core.getSerializablePluginState(p, false, false, false))
+                    : null;
+                const state = {
+                    pipelineA: serialize(this.audioManager.pipelineA),
+                    pipelineB: serialize(this.audioManager.pipelineB),
+                    currentPipeline: this.audioManager.currentPipeline
+                };
+                await window.electronAPI.savePipelineStateToFile(state);
+            }
+        } catch (err) {
+            console.warn('[savePipelineStateBeforeRisk] state save failed (continuing):', err);
+        }
+    }
+
+    /**
+     * macOS-only HDMI reconnect recovery via full app relaunch.
+     * Called from both the devicechange handler and the device-poll fallback.
+     * Gated by a 10 s cooldown and a 10 s startup grace (≤ 6 relaunches/min
+     * worst case) so that an unstable HDMI link around app launch cannot
+     * trigger an infinite relaunch loop.
+     * No-op outside the gate — caller may safely await without further checks.
+     */
+    async _doMacosRelaunch() {
+        const now = Date.now();
+        const elapsed = now - this._lastHdmiReconnectResetTime;
+        if (elapsed < 10000) {
+            return;
+        }
+
+        // Skip auto-relaunch for the first 10 s after app start to prevent
+        // infinite relaunch loops when HDMI is unstable around launch.
+        // (Was 30 s — shortened because user-driven HDMI tests within the
+        // first 30 s of startup were being silently blocked from recovery,
+        // and the cooldown alone is sufficient to bound loops at 6/min.)
+        const timeSinceStart = Date.now() - this._appStartTime;
+        if (timeSinceStart < 10000) {
+            return;
+        }
+
+        // Arm cooldown only once we've actually committed to relaunching,
+        // so the startup-grace early-return does not erroneously block
+        // legitimate reconnects within the next 10 seconds.
+        this._lastHdmiReconnectResetTime = now;
+
+        // Save pipeline state before relaunch so user's work is preserved.
+        // Use pipelineManager.core to produce the serializable form (name/enabled/parameters),
+        // not audioManager.getPipelineState() which returns raw plugin instances.
+        try {
+            const core = window.pipelineManager?.core;
+            if (window.electronAPI?.savePipelineStateToFile && core && this.audioManager) {
+                const serialize = (pl) => pl
+                    ? pl.map(p => core.getSerializablePluginState(p, false, false, false))
+                    : null;
+                const state = {
+                    pipelineA: serialize(this.audioManager.pipelineA),
+                    pipelineB: serialize(this.audioManager.pipelineB),
+                    currentPipeline: this.audioManager.currentPipeline
+                };
+                await window.electronAPI.savePipelineStateToFile(state);
+            } else if (!core) {
+                console.error('[_doMacosRelaunch] pipelineManager.core unavailable — skipping pipeline save before relaunch');
+            }
+        } catch (err) {
+            console.error('[_doMacosRelaunch] Failed to save pipeline state before relaunch — user work may be lost:', err);
+        }
+
+        try {
+            if (window.electronAPI?.relaunchApp) {
+                await window.electronAPI.relaunchApp();
+            } else {
+                console.warn('[_doMacosRelaunch] electronAPI.relaunchApp unavailable, falling back to window.location.reload()');
+                window.location.reload();
+            }
+        } catch (err) {
+            console.error('[_doMacosRelaunch] relaunchApp failed, falling back to reload:', err);
+            window.location.reload();
+        }
+    }
+
+    /**
      * Process command line arguments after all initialization is complete
      * This method handles both preset files and music files passed via command line
      */
@@ -1492,17 +1589,7 @@ async function displayAppVersion() {
     
 }
 
-// Renderer-side watchdog ping.  Sent every 2 s; main process force-relaunches
-// the app if it does not see a ping for 15 s.  This is the last-resort safety
-// net catching renderer freezes that escape our in-renderer timeout wrappers
-// (e.g., a native audio call that synchronously blocks the JS thread).
-if (window.electronAPI?.rendererPing) {
-    setInterval(() => {
-        try { window.electronAPI.rendererPing(); } catch (_) { /* fire-and-forget */ }
-    }, 2000);
-    // Send one immediately so the watchdog arms on first event-loop tick.
-    try { window.electronAPI.rendererPing(); } catch (_) { /* ignore */ }
-}
+startRendererWatchdogHeartbeat('main-page');
 
 // Set up event listeners for tray menu functionality
 if (window.electronAPI && window.electronIntegration && window.electronIntegration.isElectron) {

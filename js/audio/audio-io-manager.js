@@ -33,6 +33,12 @@ export class AudioIOManager {
         this.audioElement = null;
         this.defaultDestinationConnection = null;
         this.silenceNode = null;
+        // GainNode inserted between worklet and the final destination (audioContext
+        // .destination or MediaStreamDestination). Starts at 0 so nothing reaches
+        // the speakers until the host calls fadeInOutput() at the end of the
+        // startup sequence — i.e. after every updatePlugins (saved state, startup
+        // preset, pending tray/CLI preset, etc.) has settled into the worklet.
+        this.outputGainNode = null;
         // When true, connect worklet output directly to AudioContext.destination
         // Used for multichannel and low-latency stereo modes
         this.directOutputMode = false;
@@ -331,8 +337,15 @@ export class AudioIOManager {
     async initAudioOutput() {
         hdmiDebug('INIT', 'initAudioOutput start');
         try {
+            // Create the output gain node up front so every connect path below
+            // can route worklet output through it. Starts muted (gain=0); the host
+            // ramps to 1 via AudioManager.fadeInOutput() once the full startup
+            // pipeline chain (including any pending preset loads) is in place.
+            this.outputGainNode = this.contextManager.audioContext.createGain();
+            this.outputGainNode.gain.value = 0;
+
             // For Electron, check if we're using multichannel output
-            const preferences = window.electronAPI && window.electronIntegration ? 
+            const preferences = window.electronAPI && window.electronIntegration ?
                 await window.electronIntegration.loadAudioPreferences() : null;
             const isMultiChannel = preferences && preferences.outputChannels && preferences.outputChannels > 2;
             const lowLatencyStereo = preferences && preferences.outputChannels === 2 && preferences.lowLatencyOutput;
@@ -662,11 +675,11 @@ export class AudioIOManager {
             // Connect source to worklet
             try {
                 // Make sure both nodes exist
-                if (!this.sourceNode || !this.contextManager.workletNode) {
-                    console.error('Source or worklet node is missing');
+                if (!this.sourceNode || !this.contextManager.workletNode || !this.outputGainNode) {
+                    console.error('Source, worklet, or outputGain node is missing');
                     return `Audio Error: Audio initialization incomplete - missing audio nodes`;
                 }
-                
+
                 // Use the original connect method to avoid any overridden connect methods
                 if (window.originalConnectMethod && this.contextManager.isFirstLaunch) {
                     window.originalConnectMethod.call(this.sourceNode, this.contextManager.workletNode);
@@ -677,56 +690,54 @@ export class AudioIOManager {
                 console.error('Error connecting source to worklet:', error);
                 return `Audio Error: Failed to connect audio nodes: ${error.message}`;
             }
-            
-            // Connect based on our mode (direct output or via MediaStreamDestination)
+
+            // Insert outputGainNode between the worklet and the physical sink.
+            // gain=0 here keeps the path silent during startup/reset; the host
+            // ramps to 1 after the pipeline chain has fully settled.
+            try {
+                this.contextManager.workletNode.connect(this.outputGainNode);
+            } catch (error) {
+                console.error('Error connecting worklet to output gain:', error);
+                return `Audio Error: Failed to connect output gain: ${error.message}`;
+            }
+
+            // Connect outputGainNode to the actual sink based on our mode.
             if (this.directOutputMode) {
-                // Direct output mode - connect directly to destination
                 try {
-                    this.defaultDestinationConnection = this.contextManager.workletNode.connect(this.contextManager.audioContext.destination);
-                    
+                    this.defaultDestinationConnection = this.outputGainNode.connect(this.contextManager.audioContext.destination);
+
                     // Ensure proper multichannel configuration
                     this.contextManager.audioContext.destination.channelCountMode = 'explicit';
                     this.contextManager.audioContext.destination.channelInterpretation = 'discrete';
-                    
-                    const preferences = window.electronAPI && window.electronIntegration ? 
-                        await window.electronIntegration.loadAudioPreferences() : null;
-                    const channelCount = preferences?.outputChannels || 4;
                 } catch (error) {
                     console.error('Error connecting direct output:', error);
                     return `Audio Error: Failed to connect direct output: ${error.message}`;
                 }
             } else if (this.destinationNode) {
-                // Stereo mode with device selection - connect to MediaStreamDestination
                 try {
-                    this.contextManager.workletNode.connect(this.destinationNode);
+                    this.outputGainNode.connect(this.destinationNode);
                 } catch (error) {
-                    console.error('Error connecting worklet to destination:', error);
+                    console.error('Error connecting outputGain to destination:', error);
                     return `Audio Error: Failed to connect to audio destination: ${error.message}`;
                 }
             } else {
-                // Fallback for stereo mode without MediaStreamDestination - direct connection
                 try {
-                    this.defaultDestinationConnection = this.contextManager.workletNode.connect(this.contextManager.audioContext.destination);
+                    this.defaultDestinationConnection = this.outputGainNode.connect(this.contextManager.audioContext.destination);
                 } catch (error) {
                     console.error('Error connecting to default audio destination:', error);
                     return `Audio Error: Failed to connect to default audio destination: ${error.message}`;
                 }
             }
-            
-            // For web app (non-Electron), always connect to default destination
-            // This is crucial for audio output to work
+
+            // For web app (non-Electron), always route to default destination.
             if (!window.electronAPI || !window.electronIntegration) {
-                // Disconnect any existing connections first to avoid conflicts
                 try {
-                    this.contextManager.workletNode.disconnect();
-                } catch (e) {
-                    // Ignore errors if already disconnected
-                }
-                
-                // Always create a fresh connection for web app
+                    this.outputGainNode.disconnect();
+                } catch (e) { /* ignore */ }
+
                 try {
-                    this.defaultDestinationConnection = this.contextManager.workletNode.connect(this.contextManager.audioContext.destination);
-                    
+                    this.defaultDestinationConnection = this.outputGainNode.connect(this.contextManager.audioContext.destination);
+
                     // Ensure proper multichannel configuration for the destination
                     if (this.contextManager.audioContext.destination.channelCount > 2) {
                         this.contextManager.audioContext.destination.channelCountMode = 'explicit';
@@ -1131,6 +1142,189 @@ export class AudioIOManager {
     }
 
     /**
+     * Start periodic polling to verify audio output device is active.
+     * Fallback for macOS where HDMI reconnection may not trigger devicechange.
+     * @param {Function} getPrefs - async function returning saved preferences
+     * @param {Function} onReset  - async function(prefs) for full reinit
+     */
+    startDevicePoll(getPrefs, onReset, initiallyAbsent = false) {
+        this.stopDevicePoll();
+        this._pollDeviceWasAbsent = initiallyAbsent;
+        this._devicePollIntervalId = setInterval(async () => {
+            if (!window.electronIntegration?.isElectronEnvironment?.()) return;
+            // Skip if a previous poll tick is still running (avoids stacking)
+            if (this._pollRunning) return;
+            this._pollRunning = true;
+            try { await this._pollTick(getPrefs, onReset); } finally { this._pollRunning = false; }
+        }, 4000);
+    }
+
+    async _pollTick(getPrefs, onReset) {
+        // On macOS, skip the poll's recovery actions during the 10 s startup grace
+        // (was 30 s — kept in sync with App._doMacosRelaunch's grace window).
+        if (window.electronAPI?.platform === 'darwin' && window.app?._appStartTime) {
+            const elapsed = Date.now() - window.app._appStartTime;
+            if (elapsed < 10000) {
+                return;
+            }
+        }
+
+        let prefs;
+        try { prefs = await getPrefs(); } catch (e) {
+            console.warn('[_pollTick] Failed to load audio preferences:', e.message);
+            return;
+        }
+        if (!prefs || !prefs.outputDeviceId) return;
+
+        let devices;
+        try { devices = await navigator.mediaDevices.enumerateDevices(); } catch (e) {
+            console.warn('[_pollTick] Failed to enumerate devices:', e.message);
+            return;
+        }
+
+        const outputs = devices.filter(d => d.kind === 'audiooutput');
+
+        // Try exact ID match first; fall back to label match (HDMI may get new ID on reconnect)
+        let foundDevice = outputs.find(d => d.deviceId === prefs.outputDeviceId);
+        let foundByLabel = false;
+        if (!foundDevice && prefs.outputDeviceLabel) {
+            foundDevice = outputs.find(d => d.label === prefs.outputDeviceLabel);
+            foundByLabel = !!foundDevice;
+        }
+
+        const wasAbsent = this._pollDeviceWasAbsent;
+        this._pollDeviceWasAbsent = !foundDevice;
+
+        // Current sinkId: use AudioContext or audioElement depending on mode
+        const ctx = this.contextManager?.audioContext;
+        const el = this.audioContextSinkMode ? null : this.audioElement;
+        const currentSinkId = this.audioContextSinkMode
+            ? (ctx?.sinkId ?? 'no-ctx')
+            : (el?.sinkId ?? 'no-element');
+
+        if (!foundDevice) return;
+        if (!this.audioContextSinkMode && !el) return;
+
+        const activeDeviceId = foundDevice.deviceId;
+        const updatedPrefs = foundByLabel ? { ...prefs, outputDeviceId: activeDeviceId } : prefs;
+
+
+        // Stuck non-'running' AudioContext check.
+        // Even when sinkId already matches and the device is present, the underlying
+        // CoreAudio renderer can stay in a 'suspended' state after macOS HDMI flux
+        // (the user perceives this as audio is dead but UI is alive — the original
+        // freeze report).  Recovery: try a quick resume; if it does not bring the
+        // ctx back to 'running', defer to onReset (= _doMacosRelaunch on macOS).
+        if (this.audioContextSinkMode && ctx && ctx.state !== 'running' && ctx.state !== 'closed') {
+            try {
+                await Promise.race([
+                    ctx.resume(),
+                    new Promise(resolve => setTimeout(resolve, 3000))
+                ]);
+            } catch (e) {
+            }
+            if (ctx.state !== 'running') {
+                try {
+                    await onReset(updatedPrefs);
+                } catch (e) {
+                }
+                return;
+            }
+            return;
+        }
+
+        if (currentSinkId !== activeDeviceId || foundByLabel) {
+            // sinkId mismatch or device got a new ID — full reset needed
+            if (wasAbsent || foundByLabel) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+            try {
+                await onReset(updatedPrefs);
+            } catch (e) {
+                console.error('[_pollTick] onReset failed (sinkId mismatch path):', e.message ?? e);
+            }
+        } else if (wasAbsent) {
+            // sinkId is already correct after reconnect.
+            // If the context is already running, the devicechange handler handled
+            // the reconnect — don't interfere with another toggle.
+            if (this.audioContextSinkMode && ctx?.state === 'running') return;
+
+            // Context is not running — do a light toggle + resume.
+            try {
+                if (this.audioContextSinkMode && ctx) {
+                    await this._setSinkIdWithTimeout(ctx, '');
+                    await new Promise(r => setTimeout(r, 1000));
+                    await this._setSinkIdWithTimeout(ctx, activeDeviceId);
+                    await Promise.race([
+                        ctx.resume(),
+                        new Promise(resolve => setTimeout(resolve, 15000))
+                    ]).catch(() => {});
+                    if (ctx.state === 'running') {
+                        await window.audioManager?.rebuildPipeline(false).catch(() => {});
+                    }
+                } else if (el) {
+                    await this._setSinkIdWithTimeout(el, 'default');
+                    await new Promise(r => setTimeout(r, 300));
+                    await this._setSinkIdWithTimeout(el, activeDeviceId);
+                    if (this.destinationNode?.stream) el.srcObject = this.destinationNode.stream;
+                    await el.play().catch(() => {});
+                }
+            } catch (e) {
+                console.warn('[_pollTick] toggle+resume failed, falling back to full reset:', e.message ?? e);
+                await onReset(updatedPrefs);
+            }
+        } else if (!this.audioContextSinkMode && (el.paused || el.readyState < 2)) {
+            try { await el.play(); } catch (e) {
+                console.warn('[_pollTick] el.play() failed, falling back to full reset:', e.message ?? e);
+                await onReset(prefs);
+            }
+        }
+    }
+
+    _setSinkIdWithTimeout(target, sinkId, ms = 10000) {
+        let timerId;
+        return Promise.race([
+            target.setSinkId(sinkId).finally(() => clearTimeout(timerId)),
+            new Promise((_, reject) => {
+                timerId = setTimeout(
+                    () => reject(new Error(`setSinkId('${sinkId}') timed out after ${ms}ms`)),
+                    ms
+                );
+            })
+        ]);
+    }
+
+    /**
+     * getUserMedia with timeout — on macOS, getUserMedia can hang indefinitely when
+     * the audio system is in flux (HDMI re-re-connect, multi-display).  Apply a 5 s
+     * timeout so the renderer can fall back to silent-source mode and proceed instead
+     * of freezing.
+     */
+    _getUserMediaWithTimeout(constraints, ms = 5000) {
+        let timerId;
+        return Promise.race([
+            navigator.mediaDevices.getUserMedia(constraints).finally(() => clearTimeout(timerId)),
+            new Promise((_, reject) => {
+                timerId = setTimeout(
+                    () => reject(new Error(`getUserMedia timed out after ${ms}ms`)),
+                    ms
+                );
+            })
+        ]);
+    }
+
+    /**
+     * Stop periodic device polling
+     */
+    stopDevicePoll() {
+        if (this._devicePollIntervalId !== null) {
+            clearInterval(this._devicePollIntervalId);
+            this._devicePollIntervalId = null;
+        }
+        this._pollRunning = false;
+    }
+
+    /**
      * Clean up audio input and output
      */
     cleanupAudio() {
@@ -1148,15 +1342,18 @@ export class AudioIOManager {
             this.audioElement = null;
         }
         
-        // Disconnect from default destination if connected
-        if (this.defaultDestinationConnection && this.contextManager.workletNode && this.contextManager.audioContext) {
+        // Disconnect output gain node (which now sits between worklet and the
+        // physical destination). Disconnecting it implicitly unhooks the path
+        // to audioContext.destination / destinationNode.
+        if (this.outputGainNode) {
             try {
-                this.contextManager.workletNode.disconnect(this.contextManager.audioContext.destination);
+                this.outputGainNode.disconnect();
             } catch (error) {
-                console.warn('Error disconnecting from default destination:', error);
+                console.warn('Error disconnecting output gain node:', error);
             }
+            this.outputGainNode = null;
         }
-        
+
         // Disconnect silence node if it exists
         if (this.silenceNode && this.contextManager.audioContext) {
             try {
@@ -1166,7 +1363,7 @@ export class AudioIOManager {
                 console.warn('Error disconnecting silence node:', error);
             }
         }
-        
+
         // Stop all media tracks.  Detach the track watchers first so the
         // stop()-induced 'ended' events do not trip a spurious recovery.
         this._detachInputTrackWatchers();
@@ -1174,7 +1371,7 @@ export class AudioIOManager {
             this.stream.getTracks().forEach(track => track.stop());
             this.stream = null;
         }
-        
+
         // Clear nodes
         this.sourceNode = null;
         this.destinationNode = null;

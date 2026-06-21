@@ -123,6 +123,9 @@ contextBridge.exposeInMainWorld(
     // only — there's no return path.
     logToMain: (level, tag, text) => ipcRenderer.send('renderer-log', { level, tag, text }),
 
+    armRendererWatchdog: (reason) => ipcRenderer.invoke('renderer-watchdog-arm', reason),
+    disarmRendererWatchdog: (reason) => ipcRenderer.invoke('renderer-watchdog-disarm', reason),
+
     // Request macOS microphone TCC permission (must be called before getUserMedia)
     requestMicrophoneAccess: () => ipcRenderer.invoke('request-microphone-access'),
 

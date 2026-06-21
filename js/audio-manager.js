@@ -355,6 +355,24 @@ export class AudioManager {
      * @returns {Promise<string>} - Empty string on success, error message on failure
      */
     async rebuildPipeline(isInitializing = false) {
+        // Propagate each Section's ON/OFF state to the inner plugins'
+        // _sectionEnabled flag so analyzer redraw loops stay paused inside
+        // OFF sections after preset/URL load, paste, undo and A<->B copy.
+        // Per-plugin setEnabled() during deserialization can't do this on
+        // its own because the section's children may not exist yet at that
+        // point. Idempotent: _setSectionEnabled only acts on state change.
+        if (Array.isArray(this.pipeline)) {
+            let sectionOn = true;
+            for (let i = 0; i < this.pipeline.length; i++) {
+                const p = this.pipeline[i];
+                if (p && p.constructor && p.constructor.name === 'SectionPlugin') {
+                    sectionOn = p.enabled !== false;
+                } else if (p && typeof p._setSectionEnabled === 'function') {
+                    p._setSectionEnabled(sectionOn);
+                }
+            }
+        }
+
         // Make sure the pipeline is synchronized with the PipelineProcessor
         this.pipelineProcessor.setPipeline(this.pipeline);
         
@@ -426,26 +444,26 @@ export class AudioManager {
         hdmiDebug('RESET', 'cleanupAudio start');
         this.ioManager.cleanupAudio();
         hdmiDebug('RESET', 'cleanupAudio done');
-        
+
         // Close audio context
         hdmiDebug('RESET', 'closeAudioContext start');
         await this.contextManager.closeAudioContext();
         hdmiDebug('RESET', 'closeAudioContext done');
-        
+
         // If audio preferences were provided, save them first
         if (audioPreferences && window.electronAPI && window.electronIntegration) {
             hdmiDebug('RESET', 'saveAudioPreferences start');
             await window.electronIntegration.saveAudioPreferences(audioPreferences);
             hdmiDebug('RESET', 'saveAudioPreferences done');
         }
-        
+
         // Skip initialization if we're being called from the sample rate adjustment code
         if (this.contextManager.getSkipAudioInitDuringSampleRateChange()) {
             hdmiDebug('RESET', 'skip init due to sample-rate change flag');
             this.contextManager.setSkipAudioInitDuringSampleRateChange(false);
             return '';
         }
-        
+
         // Initialize audio (context + input + output)
         hdmiDebug('RESET', 'initAudio start');
         const audioErr = await this.initAudio();
@@ -463,13 +481,13 @@ export class AudioManager {
             }
             console.warn('[AudioManager._doReset] initAudio non-fatal warning:', audioErr);
         }
-        
+
         // Set up the AudioWorklet that hosts the plugin chain
         hdmiDebug('RESET', 'initializeAudioWorklet start');
         const workletErr = await this.initializeAudioWorklet();
         hdmiDebug('RESET', `initializeAudioWorklet done err=${workletErr || 'none'}`);
         if (workletErr) console.error('[AudioManager._doReset] initializeAudioWorklet failed:', workletErr);
-        
+
         // Resume in case the new context started suspended (autoplay policy, HDMI race, etc.)
         hdmiDebug('RESET', `resumeAudioContext start ctxState=${this.contextManager.audioContext?.state}`);
         await this.contextManager.resumeAudioContext();
@@ -481,10 +499,39 @@ export class AudioManager {
         hdmiDebug('RESET', `rebuildPipeline done err=${pipelineErr || 'none'}`);
         if (pipelineErr) console.error('[AudioManager._doReset] rebuildPipeline failed:', pipelineErr);
 
+        // After a reset the new outputGainNode starts at 0; ramp it up now that
+        // the pipeline is in place. Same primitive as the startup path in App.
+        this.fadeInOutput();
+
         hdmiDebug('RESET', `_doReset complete ctxState=${this.contextManager.audioContext?.state}`);
         return '';
     }
-    
+
+    /**
+     * Ramp the output gain from its current value to 1.
+     * Called once per audio-context lifecycle, after every updatePlugins from
+     * the startup sequence (or _doReset) has settled into the worklet. Keeps
+     * speakers silent until the configured pipeline is actually running, then
+     * fades in smoothly to avoid any click on transition.
+     * @param {number} duration - fade duration in seconds (default 50 ms)
+     */
+    fadeInOutput(duration = 0.05) {
+        const gainNode = this.ioManager?.outputGainNode;
+        const ctx = this.contextManager?.audioContext;
+        if (!gainNode || !ctx) return;
+
+        try {
+            const now = ctx.currentTime;
+            const param = gainNode.gain;
+            param.cancelScheduledValues(now);
+            param.setValueAtTime(param.value, now);
+            param.linearRampToValueAtTime(1, now + duration);
+        } catch (err) {
+            console.warn('[AudioManager] fadeInOutput failed, applying immediate unmute:', err);
+            try { gainNode.gain.value = 1; } catch (_) { /* ignore */ }
+        }
+    }
+
     /**
      * Set the pipeline of audio plugins
      * @param {Array} pipeline - Array of plugin instances
