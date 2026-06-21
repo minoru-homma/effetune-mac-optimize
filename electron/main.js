@@ -1,4 +1,4 @@
-const { app, BrowserWindow, screen, Tray, Menu, ipcMain } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
@@ -15,8 +15,16 @@ const packageJson = require('../package.json');
 const appVersion = packageJson.version;
 constants.setAppVersion(appVersion);
 
+const MIN_WINDOW_WIDTH = 1024;
+const MIN_WINDOW_HEIGHT = 768;
+
 let tray = null;
 let isAppQuitting = false;
+
+// When true, mainWindow.show() is deferred from its ready-to-show handler to
+// the splash flow's post-reload did-finish-load — so the main UI is never
+// visible behind the splash.  Set only when a splash is going to be shown.
+let pendingMainWindowShow = false;
 
 // Renderer watchdog state — the renderer is expected to call 'renderer-ping'
 // every 2 s.  If the main process does not see a ping for WATCHDOG_THRESHOLD_MS,
@@ -38,12 +46,32 @@ let watchdogRelaunchQueued = false;
 // Counts consecutive failed app.exit() attempts to bound the retry loop.
 let watchdogExitAttempts = 0;
 
-function rendererPingReceived() {
+function armRendererWatchdog(reason = 'renderer') {
   lastRendererPing = Date.now();
+  watchdogRelaunchQueued = false;
+  watchdogExitAttempts = 0;
   if (!watchdogArmed) {
     watchdogArmed = true;
-    console.log('[watchdog] First renderer ping received — watchdog armed');
+    console.log(`[watchdog] armed (${reason})`);
   }
+}
+
+function disarmRendererWatchdog(reason = 'navigation') {
+  if (watchdogArmed) {
+    console.log(`[watchdog] disarmed (${reason})`);
+  }
+  watchdogArmed = false;
+  lastRendererPing = 0;
+  watchdogRelaunchQueued = false;
+  watchdogExitAttempts = 0;
+}
+
+function rendererPingReceived() {
+  if (!watchdogArmed) {
+    armRendererWatchdog('renderer-ping');
+    return;
+  }
+  lastRendererPing = Date.now();
 }
 
 function startWatchdog() {
@@ -62,7 +90,7 @@ function startWatchdog() {
       // Step 1: register the relaunch (idempotent only against our own guard
       // — Electron's app.relaunch() queues per-call and we don't want stacks).
       if (!watchdogRelaunchQueued) {
-        app.relaunch();
+        app.relaunch({ args: [...process.argv.slice(1), constants.AUTO_RESTART_FLAG] });
         watchdogRelaunchQueued = true;
       }
       // Step 2: terminate the current process.  app.exit() returns
@@ -107,6 +135,46 @@ ipcMain.on('renderer-ping', () => {
   rendererPingReceived();
 });
 
+// Forward renderer-side diagnostic logs to the main-process terminal so users
+// running the packaged app (which has no DevTools menu) can still see them.
+ipcMain.on('renderer-log', (_event, payload) => {
+  const tag = payload && payload.tag ? `[${payload.tag}]` : '[renderer]';
+  const text = payload && payload.text != null ? String(payload.text) : '';
+  const level = payload && payload.level ? payload.level : 'log';
+  if (level === 'error') console.error(tag, text);
+  else if (level === 'warn') console.warn(tag, text);
+  else console.log(tag, text);
+  // Also tee into effetune-debug.log when the .hdmi-debug-enabled marker is
+  // present, so users on the packaged build (no terminal/DevTools) can capture
+  // renderer diagnostics via the same file workflow as hdmiDebug().
+  try {
+    const markerPath = path.join(app.getPath('userData'), '.hdmi-debug-enabled');
+    if (fs.existsSync(markerPath)) {
+      const logPath = path.join(app.getPath('userData'), 'effetune-debug.log');
+      // This tee runs for every renderer-log line; bound growth by rotating
+      // once it passes ~5 MB (keep a single .1 backup) so a long diagnostic
+      // session cannot fill the user's disk.
+      try {
+        const st = fs.statSync(logPath);
+        if (st.size > 5 * 1024 * 1024) {
+          try { fs.renameSync(logPath, logPath + '.1'); } catch (_) { /* best effort */ }
+        }
+      } catch (_) { /* file may not exist yet */ }
+      fs.appendFileSync(logPath, `[${new Date().toISOString()}] [renderer-log] ${level} ${tag} ${text}\n`);
+    }
+  } catch (_) { /* logging must never break the app */ }
+});
+
+ipcMain.handle('renderer-watchdog-arm', (_event, reason) => {
+  armRendererWatchdog(reason || 'renderer-request');
+  return { success: true };
+});
+
+ipcMain.handle('renderer-watchdog-disarm', (_event, reason) => {
+  disarmRendererWatchdog(reason || 'renderer-request');
+  return { success: true };
+});
+
 // macOS only: tell Chromium to auto-approve getUserMedia() without showing its
 // own permission UI.  The actual hardware access still goes through macOS TCC,
 // so the system-level microphone permission is still respected and the
@@ -119,41 +187,48 @@ if (process.platform === 'darwin') {
   app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
 }
 
+// WebGPU (used by the Spectrum Analyzer GPU renderer) is gated to "secure
+// contexts" in Chromium. The renderer is loaded from file:// here, which is
+// not a secure origin, so navigator.gpu.requestAdapter() returns null without
+// this switch. --enable-unsafe-webgpu bypasses the secure-context check; the
+// "unsafe" name refers to the cross-origin policy concern that does not apply
+// to a single-origin desktop app. Must be set before app.ready.
+app.commandLine.appendSwitch('enable-unsafe-webgpu');
+
 // Set up logging to file for debugging (disabled for release)
 function setupFileLogging() {
   // Disabled for release
 }
 
+// Bring mainWindow into its persisted display state (maximized or normal).
+// Used by both the initial ready-to-show path and the post-splash-reload
+// did-finish-load path, so they cannot drift out of sync.
+function showMainWindowInRestoredState(mainWindow) {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isMinimized()) return;
+  if (constants.getWindowState().isMaximized) {
+    mainWindow.maximize(); // SW_MAXIMIZE implicitly shows the window
+  } else {
+    mainWindow.show();
+  }
+  // The window now holds its final restored geometry — allow state saving.
+  windowState.markRestoreComplete();
+}
+
 // Create the main application window
 function createWindow() {
-  // Load saved window state
+  // Load saved window state and resolve the (validated, on-screen) bounds the
+  // window should be created with.
   windowState.loadWindowState();
-  
-  // Get current display scaling factor
-  const primaryDisplay = screen.getPrimaryDisplay();
-  const currentScaleFactor = primaryDisplay.scaleFactor || 1.0;
-  
-  // Get the window state
-  const state = constants.getWindowState();
-  
-  // Adjust window size if the display scale factor has changed
-  let adjustedWidth = state.width;
-  let adjustedHeight = state.height;
+  const restoredBounds = windowState.resolveWindowBoundsForRestore();
 
-  if (state.scaleFactor) {
-    const factor = currentScaleFactor / state.scaleFactor;
-    adjustedWidth = Math.round(state.width * factor);
-    adjustedHeight = Math.round(state.height * factor);
-  }
-  
   // Create the browser window
   const mainWindow = new BrowserWindow({
-    width: adjustedWidth,
-    height: adjustedHeight,
-    x: state.x,
-    y: state.y,
-    minWidth: 1024,
-    minHeight: 768,
+    width: restoredBounds.width,
+    height: restoredBounds.height,
+    x: restoredBounds.x,
+    y: restoredBounds.y,
+    minWidth: MIN_WINDOW_WIDTH,
+    minHeight: MIN_WINDOW_HEIGHT,
     icon: path.join(__dirname, '../images/favicon.ico'),
     acceptFirstMouse: true, // Accept mouse events on window activation
     show: false, // Don't show the window until it's ready
@@ -170,12 +245,23 @@ function createWindow() {
       backgroundThrottling: false
     }
   });
-  
+
+  // Windows DPI fix: the constructor sizes the window with the primary display's
+  // scale factor, so once it lands on a differently-scaled monitor the size is
+  // inflated by that monitor's scaleFactor (e.g. ×1.5) — which would compound on
+  // every save/restore cycle. The window is now positioned on its target
+  // display, so re-applying the bounds pins it to the intended logical size.
+  // macOS/Linux don't have this constructor inflation, so the guard keeps their
+  // behavior identical to before.
+  if (process.platform === 'win32') {
+    mainWindow.setBounds(restoredBounds);
+  }
+
   // Set the main window reference in modules
   constants.setMainWindow(mainWindow);
   ipcHandlers.setMainWindow(mainWindow);
   fileHandlers.setMainWindow(mainWindow);
-  
+
   // Allow renderer to access microphone via getUserMedia on file:// origin.
   // Without both handlers, Chromium falls back to its default content-settings
   // which deny media on file:// pages before the request handler is even called.
@@ -186,6 +272,14 @@ function createWindow() {
   });
   mainWindow.webContents.session.setPermissionRequestHandler((webContents, permission, callback) => {
     callback(MEDIA_PERMISSIONS.includes(permission));
+  });
+
+  // Any full-page navigation replaces the renderer that is sending heartbeat
+  // pings. Disarm here; each loaded page must explicitly arm its own heartbeat.
+  mainWindow.webContents.on('did-start-navigation', (_event, url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace) {
+      disarmRendererWatchdog(`navigation:${url}`);
+    }
   });
 
   // Enable file drag and drop for the window
@@ -390,10 +484,6 @@ function createWindow() {
 
   // When the window is ready to show
   mainWindow.once('ready-to-show', () => {
-    // Restore maximized state if needed
-    if (constants.getWindowState().isMaximized) {
-      mainWindow.maximize();
-    }
     if (constants.getAppConfig().startMinimized) {
       if (constants.getAppConfig().minimizeToTray) {
         mainWindow.hide();
@@ -402,8 +492,15 @@ function createWindow() {
         // For minimize to taskbar: show and minimize immediately
         mainWindow.minimize();
       }
-    } else {
-      mainWindow.show();
+      // Final state reached (hidden/minimized) — allow state saving.
+      windowState.markRestoreComplete();
+    } else if (!pendingMainWindowShow) {
+      // NOTE: maximize() MUST stay inside this branch.  On Win32 it issues
+      // ShowWindow(SW_MAXIMIZE), which makes the (until then hidden) window
+      // visible as a side effect — defeating the splash defer.  So the
+      // maximize+show pair has to be co-deferred when a splash is pending,
+      // and re-applied in the post-reload did-finish-load handler.
+      showMainWindowInRestoredState(mainWindow);
     }
   });
   
@@ -596,6 +693,8 @@ function createWindow() {
   // Save window state when window is moved or resized
   mainWindow.on('resize', () => windowState.saveWindowState());
   mainWindow.on('move', () => windowState.saveWindowState());
+  mainWindow.on('maximize', () => windowState.saveWindowState());
+  mainWindow.on('unmaximize', () => windowState.saveWindowState());
   
   mainWindow.on('minimize', (e) => {
     if (constants.getAppConfig().minimizeToTray) {
@@ -895,10 +994,12 @@ function createSplashScreen() {
       return;
     }
     
-    // Position splash window in the center of the main window
+    // Position splash window in the center of the main window's final
+    // restored bounds. Maximized startup is deferred until after the splash,
+    // so derive that final bounds explicitly while the main window is hidden.
     const mainWindow = constants.getMainWindow();
     if (mainWindow) {
-      const mainBounds = mainWindow.getBounds();
+      const mainBounds = windowState.getSplashTargetBounds();
       const splashBounds = splashWindow.getBounds();
       
       // Calculate the center position
@@ -933,7 +1034,7 @@ function createSplashScreen() {
         splashWindow.close();
         splashWindow = null;
       }
-      
+
       // Persist the first-launch-done marker so future launches skip this
       // splash + reload workaround.  Best-effort — if the write fails, we
       // simply repeat the splash next time.
@@ -943,7 +1044,16 @@ function createSplashScreen() {
       } catch (e) {
         console.warn('Failed to write first-launch-done marker:', e);
       }
-      
+
+      // If the maximize+show pair was deferred to hide the UI behind the
+      // splash, apply it once the reloaded content has finished loading.
+      if (pendingMainWindowShow) {
+        mainWindow.webContents.once('did-finish-load', () => {
+          pendingMainWindowShow = false;
+          showMainWindowInRestoredState(mainWindow);
+        });
+      }
+
       // Reload the main window
       mainWindow.reload();
       
@@ -1144,9 +1254,10 @@ function initializeApp() {
   });
   
   // Show the splash screen + 3-second reload workaround only on the actual
-  // first launch (when no first-launch-done marker exists in userData).
-  // Persisting this avoids paying the 3-second reload (which resets the
-  // renderer's startup-grace clock) on every launch and after every relaunch.
+  // first launch (when no first-launch-done marker exists in userData), and
+  // never on auto-restart (watchdog / HDMI-recovery IPC).  Persisting the
+  // marker avoids paying the 3-second reload — which resets the renderer's
+  // startup-grace clock — on every launch and after every relaunch.
   const firstLaunchMarker = path.join(app.getPath('userData'), '.first-launch-done');
   let isActuallyFirstLaunch = false;
   try {
@@ -1155,19 +1266,32 @@ function initializeApp() {
     isActuallyFirstLaunch = true; // be safe — show splash if we can't tell
   }
 
-  if (isActuallyFirstLaunch) {
-    createSplashScreen();
-  } else {
-    // Subsequent launch: skip splash + reload entirely.
+  if (process.argv.includes(constants.AUTO_RESTART_FLAG) || !isActuallyFirstLaunch) {
+    // Auto-restart or subsequent launch: skip splash + reload entirely.
     constants.setIsFirstLaunch(false);
+  } else {
+    // Actual first launch: defer mainWindow.show() to after the splash's 3s
+    // reload so the user never sees the main UI behind the splash.  Skip the
+    // defer when starting minimized — the ready-to-show handler hides/minimizes
+    // the window itself.
+    if (!constants.getAppConfig().startMinimized) {
+      pendingMainWindowShow = true;
+    }
+    createSplashScreen();
   }
 }
 
 // Initialize global variables
 initGlobalVariables();
 
-// Disable hardware acceleration to avoid DXGI errors
-app.disableHardwareAcceleration();
+// Hardware acceleration is kept ENABLED on all platforms.
+// Previously it was disabled on Windows to avoid DXGI errors, but that forced
+// the GPU process into software rendering, so the Spectrum Analyzer's WebGPU
+// renderer only ever got Chromium's SwiftShader fallback adapter
+// (adapter.info.vendor === 'google').  That software device is recycled by the
+// GPU process roughly once per second (device lost: "destroyed"), leaving the
+// analyzer permanently black.  Keeping hardware acceleration on exposes the
+// real GPU adapter so WebGPU stays alive.
 
 // Store command line arguments for processing after splash screen
 constants.setSavedCommandLineMusicFiles([...process.argv]);

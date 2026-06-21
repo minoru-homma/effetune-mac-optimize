@@ -1,0 +1,12 @@
+[package]
+name = "peq_dsp"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Shared RBJ-cookbook biquad coefficient design + biquad state, used by both
+# the 5-Band and 15-Band PEQ WASM crates (previously byte-identical copies of
+# biquad.rs / design.rs in each). Plain library crate — the build profile is
+# governed by the depending cdylib crate.
+[lib]
+crate-type = ["rlib"]

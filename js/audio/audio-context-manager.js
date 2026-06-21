@@ -267,7 +267,10 @@ export class AudioContextManager {
                 channelInterpretation: 'discrete'
             });
             window.workletNode = this.workletNode;
-            
+            // Notify existing plugin instances so they re-bind their message
+            // listeners to this new port (old port is dead after a reset).
+            window.dispatchEvent(new Event('worklet-node-recreated'));
+
             // Apply pending audio configuration if exists
             if (this._pendingAudioConfig) {
                 this.workletNode.port.postMessage({

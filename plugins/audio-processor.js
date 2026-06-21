@@ -11,6 +11,7 @@ class PluginProcessor extends AudioWorkletProcessor {
         this.currentFrame = 0;
         this.pluginProcessors = new Map();
         this.pluginContexts = new Map();
+        this.wasmModules = new Map(); // pluginType -> WebAssembly.Module
         this.masterBypass = false;
 
         // Audio configuration
@@ -87,6 +88,42 @@ class PluginProcessor extends AudioWorkletProcessor {
                     break;
                 case 'registerProcessor':
                     this.registerPluginProcessor(data.pluginType, data.processor);
+                    break;
+                case 'registerWasmBytes':
+                    {
+                        // Compile the WASM module synchronously on the audio thread.
+                        // `new WebAssembly.Module()` blocks but our binaries are tiny
+                        // (~25 KB) and this happens once per plugin type, well before
+                        // process_block is hit.
+                        let module = null;
+                        let err = '';
+                        try {
+                            if (data.bytes instanceof ArrayBuffer) {
+                                module = new WebAssembly.Module(data.bytes);
+                            } else {
+                                err = 'bytes is not ArrayBuffer (got ' + (typeof data.bytes) + ')';
+                            }
+                        } catch (e) {
+                            err = e && e.message ? e.message : String(e);
+                        }
+                        if (module) {
+                            this.wasmModules.set(data.pluginType, module);
+                            // Retroactively attach to any plugin instance whose context was
+                            // already created before the async WASM compile resolved.
+                            for (const plugin of this.plugins) {
+                                if (plugin.type !== data.pluginType) continue;
+                                const ctx = this.pluginContexts.get(plugin.id);
+                                if (ctx && !ctx.wasmModule) {
+                                    ctx.wasmModule = module;
+                                }
+                            }
+                        } else if (err) {
+                            this.port.postMessage({
+                                type: 'log', level: 'error', tag: data.pluginType,
+                                text: 'worklet WASM compile failed: ' + err
+                            });
+                        }
+                    }
                     break;
                 case 'userActivity':
                     { // Block scope for const time
@@ -230,15 +267,26 @@ class PluginProcessor extends AudioWorkletProcessor {
         const time = currentFrame / sampleRate; // Time in seconds
 
         // --- 4. Input Level Monitoring & Sleep Mode Update ---
+        // We treat a channel as silent only if its AC component (peak-to-peak
+        // range with the DC offset removed) is below 2 * threshold. This
+        // matters because some plugins (e.g. Exciter with a non-zero bias)
+        // emit a constant DC component for a silent input, which would
+        // otherwise be classified as "signal" and forever prevent sleep mode.
         let hasInputSignal = false;
-        // Iterate only necessary input channels (min of input channels and expected max like 2?)
-        const inputChannelsToCheck = Math.min(input.length, outputChannelCount); // Check up to output channel count
+        const inputChannelsToCheck = Math.min(input.length, outputChannelCount);
+        const acThreshold = 2 * silenceThresholdAmplitude;
         for (let channel = 0; channel < inputChannelsToCheck; channel++) {
             const channelData = input[channel];
-            // Use Array.prototype.some for potentially faster check (stops on first non-silent sample)
-            if (channelData.some(sample => Math.abs(sample) > silenceThresholdAmplitude)) {
+            let cmin = Infinity, cmax = -Infinity;
+            for (let i = 0; i < channelData.length; i++) {
+                const v = channelData[i];
+                if (v < cmin) cmin = v;
+                if (v > cmax) cmax = v;
+                if (cmax - cmin > acThreshold) break; // early exit
+            }
+            if (cmax - cmin > acThreshold) {
                 hasInputSignal = true;
-                break; // Exit channel loop once signal is found
+                break;
             }
         }
 
@@ -420,6 +468,10 @@ class PluginProcessor extends AudioWorkletProcessor {
             let pluginContext = pluginContexts.get(plugin.id);
             if (!pluginContext) {
                 pluginContext = {}; // Initialize empty context
+                const wasmModule = this.wasmModules.get(plugin.type);
+                if (wasmModule) {
+                    pluginContext.wasmModule = wasmModule;
+                }
                 pluginContexts.set(plugin.id, pluginContext);
             }
             // Prepare the context object for the processor call.
@@ -744,14 +796,24 @@ class PluginProcessor extends AudioWorkletProcessor {
 
 
         // --- 11. Output Level Monitoring ---
+        // Same AC-only check as input monitoring (see section 4) so that a
+        // constant DC offset on the output (e.g. introduced by Exciter with
+        // a non-zero bias) does not block sleep mode entry.
         let hasOutputSignal = false;
-        // Check the actual physical output buffer levels
         const outputChannelsToCheck = Math.min(output.length, outputChannelCount);
+        const outAcThreshold = 2 * silenceThresholdAmplitude;
         for (let channel = 0; channel < outputChannelsToCheck; channel++) {
             const channelData = output[channel];
-            if (channelData.some(sample => Math.abs(sample) > silenceThresholdAmplitude)) {
+            let cmin = Infinity, cmax = -Infinity;
+            for (let i = 0; i < channelData.length; i++) {
+                const v = channelData[i];
+                if (v < cmin) cmin = v;
+                if (v > cmax) cmax = v;
+                if (cmax - cmin > outAcThreshold) break; // early exit
+            }
+            if (cmax - cmin > outAcThreshold) {
                 hasOutputSignal = true;
-                break; // Exit loop early
+                break;
             }
         }
 

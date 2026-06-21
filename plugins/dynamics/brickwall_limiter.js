@@ -14,6 +14,7 @@ class BrickwallLimiterPlugin extends PluginBase {
         this.lastProcessTime = performance.now() / 1000;
 
         this._setupMessageHandler();
+        this._loadWasmModule();
 
         // Register the audio processing function with Audio Worklet.
         // Processing chain:
@@ -37,6 +38,75 @@ class BrickwallLimiterPlugin extends PluginBase {
             const numChannels = parameters.channelCount;
             const blockSize = parameters.blockSize;
             const sampleRate = parameters.sampleRate;
+
+            // --- WebAssembly fast path ---
+            // Activated only when registerWasmModule succeeded for this plugin type.
+            // Falls back to the JS implementation below on any error.
+            if (context.wasmModule && !context.wasmDisabled) {
+              try {
+                let w = context.wasm;
+                const osFactorWasm = parameters.os;
+                if (!w
+                    || w.cfgSampleRate !== sampleRate
+                    || w.cfgChannelCount !== numChannels
+                    || w.cfgBlockSize !== blockSize
+                    || w.cfgOsFactor !== osFactorWasm) {
+                  if (w) w.ex.free_state(w.sp);
+                  const inst = new WebAssembly.Instance(context.wasmModule);
+                  const ex = inst.exports;
+                  const sp = ex.init(sampleRate, numChannels, blockSize, osFactorWasm);
+                  w = {
+                    ex: ex, memory: ex.memory, sp: sp,
+                    cfgSampleRate: sampleRate, cfgChannelCount: numChannels,
+                    cfgBlockSize: blockSize, cfgOsFactor: osFactorWasm,
+                    paramFingerprint: ''
+                  };
+                  context.wasm = w;
+                  if (context.port && !context.wasmAnnounced) {
+                    context.wasmAnnounced = true;
+                    context.port.postMessage({
+                      type: 'log', tag: 'BrickwallLimiter',
+                      text: 'WASM instance active (sr=' + sampleRate + ' ch=' + numChannels
+                        + ' bs=' + blockSize + ' os=' + osFactorWasm + ')'
+                    });
+                  }
+                }
+                const fp = parameters.th + ',' + parameters.rl + ',' + parameters.la
+                  + ',' + parameters.ig + ',' + parameters.sm;
+                if (fp !== w.paramFingerprint) {
+                  w.ex.set_params(w.sp, parameters.th, parameters.rl, parameters.la,
+                    parameters.ig !== undefined ? parameters.ig : 0,
+                    parameters.sm !== undefined ? parameters.sm : -1);
+                  w.paramFingerprint = fp;
+                }
+                const samples = numChannels * blockSize;
+                // Create input view and copy in BEFORE process_block.
+                new Float32Array(w.memory.buffer, w.ex.input_ptr(w.sp), samples)
+                  .set(data.subarray(0, samples));
+                w.ex.process_block(w.sp, blockSize);
+                // process_block may have grown WASM memory (Vec reallocation), which
+                // detaches any view created beforehand.  Create the output view AFTER
+                // process_block returns so the buffer reference is current.
+                const outView = new Float32Array(w.memory.buffer, w.ex.output_ptr(w.sp), samples);
+                if (!context.outputBuffer || context.outputBuffer.length !== samples) {
+                  context.outputBuffer = new Float32Array(samples);
+                }
+                context.outputBuffer.set(outView);
+                context.outputBuffer.measurements = {
+                  time: parameters.time !== undefined ? parameters.time : 0,
+                  gainReduction: w.ex.last_gain_reduction(w.sp)
+                };
+                return context.outputBuffer;
+              } catch (err) {
+                context.wasmDisabled = true;
+                context.wasm = null;
+                if (context.port) {
+                  context.port.postMessage({ type: 'log', level: 'warn', tag: 'BrickwallLimiter',
+                    text: 'WASM error, fell back to JS: ' + (err && err.message) });
+                }
+              }
+            }
+
             // Optimization: Cache parameter access
             const osFactor = parameters.os;
             const inputGainDb = parameters.ig !== undefined ? parameters.ig : 0;
@@ -745,6 +815,37 @@ class BrickwallLimiterPlugin extends PluginBase {
     
     _setupMessageHandler() {
         // No additional message handling required.
+    }
+
+    _loadWasmModule() {
+        if (typeof window === 'undefined' || typeof WebAssembly === 'undefined') return;
+        try {
+            const currentPath = window.location.pathname;
+            const basePath = currentPath.substring(0, currentPath.lastIndexOf('/'));
+            const url = `${basePath}/plugins/wasm/brickwall_limiter.wasm`;
+            fetch(url)
+                .then(r => {
+                    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                    return r.arrayBuffer();
+                })
+                .then(buf => {
+                    this.registerWasmModule(buf);
+                    const msg = 'WASM bytes fetched (' + buf.byteLength + 'B), forwarded to worklet.';
+                    console.log('[BrickwallLimiter]', msg);
+                    if (window.electronAPI && window.electronAPI.logToMain) {
+                        window.electronAPI.logToMain('info', 'BrickwallLimiter', msg);
+                    }
+                })
+                .catch(err => {
+                    const msg = 'WASM unavailable, using JS path: ' + err.message;
+                    console.warn('[BrickwallLimiter]', msg);
+                    if (window.electronAPI && window.electronAPI.logToMain) {
+                        window.electronAPI.logToMain('warn', 'BrickwallLimiter', msg);
+                    }
+                });
+        } catch (err) {
+            console.warn('[BrickwallLimiter] WASM load skipped:', err.message);
+        }
     }
     
     _validateParameters(params) {
