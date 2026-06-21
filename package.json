@@ -52,7 +52,11 @@
     "files": [
       "**/*",
       "!dist/**/*",
-      "!node_modules/**/*"
+      "!node_modules/**/*",
+      "!**/*.log",
+      "!*.txt",
+      "!*.bak",
+      "!.git/**/*"
     ],
     "fileAssociations": [
       {
@@ -167,6 +171,16 @@
     },
     "asar": true,
     "asarUnpack": [],
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": false,
+      "enableNodeOptionsEnvironmentVariable": true,
+      "enableNodeCliInspectArguments": true,
+      "enableEmbeddedAsarIntegrityValidation": false,
+      "onlyLoadAppFromAsar": false,
+      "loadBrowserProcessSpecificV8Snapshot": false,
+      "grantFileProtocolExtraPrivileges": true
+    },
     "npmRebuild": false,
     "forceCodeSigning": false,
     "electronDownload": {
